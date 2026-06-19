@@ -61,8 +61,6 @@ func (s *Server) Routes() http.Handler {
 	m.HandleFunc("POST /api/orders", s.auth(s.purchase))
 	m.HandleFunc("GET /api/orders/{id}", s.auth(s.orderStatus))
 	m.HandleFunc("POST /api/orders/{id}/cancel", s.auth(s.cancel))
-	m.HandleFunc("POST /api/recharges", s.auth(s.recharge))
-	m.HandleFunc("GET /api/recharges/{id}", s.auth(s.rechargeStatus))
 	m.HandleFunc("GET /sandbox/pay/{id}", s.sandboxPay)
 	m.HandleFunc("POST /sandbox/pay/{id}", s.sandboxComplete)
 	m.HandleFunc("POST /api/payments/yishoumi/notify", s.ysmNotify)
@@ -209,7 +207,7 @@ func (s *Server) purchase(w http.ResponseWriter, r *http.Request, u store.User) 
 	}
 	var in struct {
 		Country, Service string
-		AutoReplace      bool `json:"autoReplace"`
+		PayType          int `json:"payType"`
 	}
 	if decode(r, &in) != nil || in.Country == "" || in.Service == "" {
 		fail(w, 400, "请选择国家和服务")
@@ -231,30 +229,47 @@ func (s *Server) purchase(w http.ResponseWriter, r *http.Request, u store.User) 
 		fail(w, 409, "该服务暂时无库存")
 		return
 	}
-	o := store.SMSOrder{ID: store.ID("S"), UserID: u.ID, Country: in.Country, Service: in.Service, UpstreamCost: offer.Cost, PriceFen: pricing.SaleFen(offer.Cost, s.C.USDCNY, s.C.Markup), AutoReplace: in.AutoReplace, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	if e = s.Store.CreateSMS(u, o); e != nil {
-		fail(w, 409, e)
+	if in.PayType == 0 {
+		in.PayType = 2
+	}
+	if in.PayType != 1 && in.PayType != 2 && in.PayType != 3 && in.PayType != 11 {
+		fail(w, 400, "unsupported payment method")
 		return
 	}
-	act, e := s.Hero.Acquire(r.Context(), in.Country, in.Service, offer.Cost)
+	now := time.Now().UTC().Format(time.RFC3339)
+	o := store.SMSOrder{ID: store.ID("S"), UserID: u.ID, Country: in.Country, Service: in.Service, UpstreamCost: offer.Cost, PriceFen: pricing.SaleFen(offer.Cost, s.C.USDCNY, s.C.Markup), AutoReplace: true, CreatedAt: now}
+	raw, _ := store.Token()
+	payment := store.Recharge{ID: store.ID("P"), UserID: u.ID, AmountFen: o.PriceFen, Provider: s.C.PayProvider, PayType: strconv.Itoa(in.PayType), Token: raw, Reference: o.ID, CreatedAt: now}
+	if e = s.Store.CreateSMSPayment(u, o, payment); e != nil {
+		fail(w, 500, e)
+		return
+	}
+	if s.C.PayProvider == "sandbox" {
+		jsonOut(w, 201, map[string]any{"id": o.ID, "paymentId": payment.ID, "priceFen": o.PriceFen, "checkoutUrl": fmt.Sprintf("/sandbox/pay/%s?token=%s", payment.ID, url.QueryEscape(raw))})
+		return
+	}
+	if s.C.PayProvider != "yishoumi" || s.C.YSMAppID == "" || s.C.YSMSecret == "" {
+		_ = s.Store.SetRechargeStatus(payment.ID, "failed")
+		fail(w, 503, "payment provider is not configured")
+		return
+	}
+	out, e := s.YSM.Create(r.Context(), payment.ID, o.PriceFen, in.PayType, s.C.BaseURL+"/api/payments/yishoumi/notify", s.C.BaseURL+"/?order="+o.ID)
 	if e != nil {
-		_ = s.Store.RefundSMS(o.ID, "purchase_failed")
+		_ = s.Store.SetRechargeStatus(payment.ID, "failed")
 		fail(w, 502, e)
 		return
 	}
-	if e = s.Store.ActivateSMS(o.ID, act.ID, act.Phone, act.Cost); e != nil {
-		log.Printf("activate persistence failed: %v", e)
-		fail(w, 500, "订单保存失败，请联系客服")
-		return
-	}
-	o, e = s.Store.GetSMS(o.ID, u.ID)
-	jsonOut(w, 201, o)
+	jsonOut(w, 201, map[string]any{"id": o.ID, "paymentId": payment.ID, "priceFen": o.PriceFen, "checkoutUrl": out.URL})
 }
 func (s *Server) orderStatus(w http.ResponseWriter, r *http.Request, u store.User) {
 	o, e := s.Store.GetSMS(r.PathValue("id"), u.ID)
 	if e != nil {
 		fail(w, 404, "订单不存在")
 		return
+	}
+	if o.Status == "paid" {
+		s.fulfillPaidOrder(r.Context(), o)
+		o, _ = s.Store.GetSMS(o.ID, u.ID)
 	}
 	if o.UpstreamID != "" && o.Status == "waiting" {
 		st, e := s.Hero.Status(r.Context(), o.UpstreamID)
@@ -291,6 +306,13 @@ func (s *Server) cancel(w http.ResponseWriter, r *http.Request, u store.User) {
 		fail(w, 409, "已收到验证码，不能取消")
 		return
 	}
+	if direct, err := s.Store.IsSMSPaymentOrder(o.ID); err != nil {
+		fail(w, 500, err)
+		return
+	} else if direct {
+		fail(w, 409, "按单支付订单将持续换号，暂不支持手动退款取消")
+		return
+	}
 	if o.Status != "waiting" {
 		fail(w, 409, "order is not cancellable in its current state")
 		return
@@ -313,9 +335,6 @@ func (s *Server) cancel(w http.ResponseWriter, r *http.Request, u store.User) {
 }
 
 func (s *Server) RunAutoReplace(ctx context.Context) {
-	if s.C.AutoReplaceMax == 0 {
-		return
-	}
 	if orders, err := s.Store.ListReplacing(20); err != nil {
 		log.Printf("auto replace recovery scan failed: %v", err)
 	} else {
@@ -325,14 +344,60 @@ func (s *Server) RunAutoReplace(ctx context.Context) {
 	}
 	ticker := time.NewTicker(s.C.AutoReplaceScan)
 	defer ticker.Stop()
+	s.runPaidOrderBatch(ctx)
 	s.runAutoReplaceBatch(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			s.runPaidOrderBatch(ctx)
 			s.runAutoReplaceBatch(ctx)
+			s.runReplacingBatch(ctx)
 		}
+	}
+}
+
+func (s *Server) runPaidOrderBatch(ctx context.Context) {
+	orders, err := s.Store.ListPaidSMS(20)
+	if err != nil {
+		log.Printf("paid SMS order scan failed: %v", err)
+		return
+	}
+	for _, o := range orders {
+		s.fulfillPaidOrder(ctx, o)
+	}
+}
+
+func (s *Server) fulfillPaidOrder(ctx context.Context, o store.SMSOrder) {
+	claimed, err := s.Store.ClaimPaidSMS(o.ID)
+	if err != nil || !claimed {
+		return
+	}
+	act, err := s.Hero.Acquire(ctx, o.Country, o.Service, o.UpstreamCost)
+	if err != nil {
+		_ = s.Store.ReleasePaidSMS(o.ID)
+		log.Printf("paid SMS order %s is waiting for inventory: %v", o.ID, err)
+		return
+	}
+	if err = s.Store.ActivateSMS(o.ID, act.ID, act.Phone, act.Cost); err != nil {
+		_ = s.Store.ReleasePaidSMS(o.ID)
+		log.Printf("paid SMS order %s activation persistence failed: %v", o.ID, err)
+	}
+}
+
+func (s *Server) runReplacingBatch(ctx context.Context) {
+	orders, err := s.Store.ListReplacing(20)
+	if err != nil {
+		log.Printf("replacing SMS order scan failed: %v", err)
+		return
+	}
+	for _, o := range orders {
+		lastAttempt, err := time.Parse(time.RFC3339, o.LastNumberAt)
+		if err == nil && time.Since(lastAttempt) < 30*time.Second {
+			continue
+		}
+		s.replaceNumber(ctx, o)
 	}
 }
 
@@ -394,9 +459,8 @@ func (s *Server) acquireReplacement(ctx context.Context, o store.SMSOrder) {
 	_ = s.Store.EndCurrentAttempt(o.ID, o.UpstreamID, "cancelled")
 	act, err := s.Hero.Acquire(ctx, o.Country, o.Service, o.UpstreamCost)
 	if err != nil {
-		if e := s.Store.RefundSMS(o.ID, "replace_failed"); e != nil {
-			log.Printf("auto replace refund failed for %s: %v", o.ID, e)
-		}
+		_ = s.Store.TouchReplacing(o.ID)
+		log.Printf("auto replace waiting for inventory for %s: %v", o.ID, err)
 		return
 	}
 	if err = s.Store.ReplaceActivation(o.ID, o.UpstreamID, act.ID, act.Phone, act.Cost); err != nil {
@@ -404,59 +468,9 @@ func (s *Server) acquireReplacement(ctx context.Context, o store.SMSOrder) {
 	}
 }
 
-func (s *Server) recharge(w http.ResponseWriter, r *http.Request, u store.User) {
-	var in struct {
-		AmountFen int64 `json:"amountFen"`
-		PayType   int   `json:"payType"`
-	}
-	if decode(r, &in) != nil || in.AmountFen < 100 || in.AmountFen > 1000000 {
-		fail(w, 400, "充值金额应为 1 至 10000 元")
-		return
-	}
-	if in.PayType == 0 {
-		in.PayType = 2
-	}
-	if in.PayType != 1 && in.PayType != 2 && in.PayType != 3 && in.PayType != 11 {
-		fail(w, 400, "unsupported payment method")
-		return
-	}
-	if s.C.PayProvider != "sandbox" && (s.C.PayProvider != "yishoumi" || s.C.YSMAppID == "" || s.C.YSMSecret == "") {
-		fail(w, 503, "payment provider is not configured")
-		return
-	}
-	raw, _ := store.Token()
-	rr := store.Recharge{ID: store.ID("R"), UserID: u.ID, AmountFen: in.AmountFen, Provider: s.C.PayProvider, PayType: strconv.Itoa(in.PayType), Token: raw, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	if e := s.Store.CreateRecharge(rr); e != nil {
-		fail(w, 500, e)
-		return
-	}
-	if s.C.PayProvider == "sandbox" {
-		jsonOut(w, 201, map[string]any{"id": rr.ID, "checkoutUrl": fmt.Sprintf("/sandbox/pay/%s?token=%s", rr.ID, url.QueryEscape(raw))})
-		return
-	}
-	if s.C.PayProvider != "yishoumi" || s.C.YSMAppID == "" || s.C.YSMSecret == "" {
-		fail(w, 503, "支付通道未配置")
-		return
-	}
-	out, e := s.YSM.Create(r.Context(), rr.ID, in.AmountFen, in.PayType, s.C.BaseURL+"/api/payments/yishoumi/notify", s.C.BaseURL+"/?recharge="+rr.ID)
-	if e != nil {
-		_ = s.Store.SetRechargeStatus(rr.ID, "failed")
-		fail(w, 502, e)
-		return
-	}
-	jsonOut(w, 201, map[string]any{"id": rr.ID, "checkoutUrl": out.URL})
-}
-func (s *Server) rechargeStatus(w http.ResponseWriter, r *http.Request, u store.User) {
-	x, e := s.Store.GetRecharge(r.PathValue("id"))
-	if e != nil || x.UserID != u.ID {
-		fail(w, 404, "充值订单不存在")
-		return
-	}
-	jsonOut(w, 200, x)
-}
 func (s *Server) sandboxPay(w http.ResponseWriter, r *http.Request) {
 	x, e := s.Store.GetRecharge(r.PathValue("id"))
-	if e != nil || x.Provider != "sandbox" || x.Token != r.URL.Query().Get("token") {
+	if e != nil || x.Provider != "sandbox" || x.Reference == "" || x.Token != r.URL.Query().Get("token") {
 		http.Error(w, "invalid order", 404)
 		return
 	}
@@ -466,15 +480,19 @@ func (s *Server) sandboxPay(w http.ResponseWriter, r *http.Request) {
 func (s *Server) sandboxComplete(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	x, e := s.Store.GetRecharge(r.PathValue("id"))
-	if e != nil || x.Provider != "sandbox" || x.Token != r.Form.Get("token") {
+	if e != nil || x.Provider != "sandbox" || x.Reference == "" || x.Token != r.Form.Get("token") {
 		http.Error(w, "invalid order", 400)
 		return
 	}
-	if e = s.Store.CreditRecharge(x.ID, ""); e != nil {
-		http.Error(w, e.Error(), 409)
+	orderID, err := s.Store.CompleteSMSPayment(x.ID, "")
+	if err != nil {
+		http.Error(w, err.Error(), 409)
 		return
 	}
-	http.Redirect(w, r, "/?recharge="+x.ID, http.StatusSeeOther)
+	if order, err := s.Store.GetSMSByID(orderID); err == nil {
+		s.fulfillPaidOrder(r.Context(), order)
+	}
+	http.Redirect(w, r, "/?order="+orderID, http.StatusSeeOther)
 }
 func (s *Server) ysmNotify(w http.ResponseWriter, r *http.Request) {
 	if s.C.PayProvider != "yishoumi" || s.C.YSMAppID == "" || s.C.YSMSecret == "" {
@@ -490,7 +508,7 @@ func (s *Server) ysmNotify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	x, e := s.Store.GetRecharge(r.PostForm.Get("mch_orderid"))
-	if e != nil || x.Provider != "yishoumi" {
+	if e != nil || x.Provider != "yishoumi" || x.Reference == "" {
 		http.Error(w, "unknown order", 404)
 		return
 	}
@@ -504,9 +522,13 @@ func (s *Server) ysmNotify(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing provider order", 400)
 		return
 	}
-	if e = s.Store.CreditRecharge(x.ID, providerID); e != nil {
-		http.Error(w, e.Error(), 409)
+	orderID, err := s.Store.CompleteSMSPayment(x.ID, providerID)
+	if err != nil {
+		http.Error(w, err.Error(), 409)
 		return
+	}
+	if order, err := s.Store.GetSMSByID(orderID); err == nil {
+		s.fulfillPaidOrder(r.Context(), order)
 	}
 	w.Write([]byte("success"))
 }

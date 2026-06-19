@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -102,7 +103,7 @@ func TestAuthenticatedRequestRefreshesPersistentSessionCookie(t *testing.T) {
 	}
 }
 
-func TestRechargeThenPurchaseEndToEnd(t *testing.T) {
+func TestPayForSMSOrderThenAcquireEndToEnd(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "flow.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -130,19 +131,28 @@ func TestRechargeThenPurchaseEndToEnd(t *testing.T) {
 	}
 	session := registerResult.Result().Cookies()[0]
 
-	recharge := httptest.NewRequest(http.MethodPost, "/api/recharges", strings.NewReader(`{"amountFen":500,"payType":2}`))
-	recharge.Header.Set("content-type", "application/json")
-	recharge.AddCookie(session)
-	rechargeResult := httptest.NewRecorder()
-	h.ServeHTTP(rechargeResult, recharge)
-	if rechargeResult.Code != http.StatusCreated {
-		t.Fatalf("recharge status=%d body=%s", rechargeResult.Code, rechargeResult.Body.String())
+	purchase := httptest.NewRequest(http.MethodPost, "/api/orders", strings.NewReader(`{"Country":"6","Service":"tg","payType":2}`))
+	purchase.Header.Set("content-type", "application/json")
+	purchase.AddCookie(session)
+	purchaseResult := httptest.NewRecorder()
+	h.ServeHTTP(purchaseResult, purchase)
+	if purchaseResult.Code != http.StatusCreated {
+		t.Fatalf("purchase status=%d body=%s", purchaseResult.Code, purchaseResult.Body.String())
 	}
 	var checkout struct {
-		URL string `json:"checkoutUrl"`
+		ID       string `json:"id"`
+		PriceFen int64  `json:"priceFen"`
+		URL      string `json:"checkoutUrl"`
 	}
-	if err = json.NewDecoder(rechargeResult.Body).Decode(&checkout); err != nil {
+	if err = json.NewDecoder(purchaseResult.Body).Decode(&checkout); err != nil {
 		t.Fatal(err)
+	}
+	if checkout.PriceFen != 460 {
+		t.Fatalf("price=%d, want 460", checkout.PriceFen)
+	}
+	pending, err := db.GetSMS(checkout.ID, 1)
+	if err != nil || pending.Status != "awaiting_payment" || pending.Phone != "" {
+		t.Fatalf("order before payment=%+v err=%v", pending, err)
 	}
 	checkoutURL, err := url.Parse(checkout.URL)
 	if err != nil {
@@ -157,16 +167,8 @@ func TestRechargeThenPurchaseEndToEnd(t *testing.T) {
 		t.Fatalf("pay status=%d body=%s", payResult.Code, payResult.Body.String())
 	}
 
-	purchase := httptest.NewRequest(http.MethodPost, "/api/orders", strings.NewReader(`{"Country":"6","Service":"tg","autoReplace":true}`))
-	purchase.Header.Set("content-type", "application/json")
-	purchase.AddCookie(session)
-	purchaseResult := httptest.NewRecorder()
-	h.ServeHTTP(purchaseResult, purchase)
-	if purchaseResult.Code != http.StatusCreated {
-		t.Fatalf("purchase status=%d body=%s", purchaseResult.Code, purchaseResult.Body.String())
-	}
-	var order store.SMSOrder
-	if err = json.NewDecoder(purchaseResult.Body).Decode(&order); err != nil {
+	order, err := db.GetSMS(checkout.ID, 1)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if order.Phone != "628001" || order.PriceFen != 460 || !order.AutoReplace {
@@ -176,8 +178,126 @@ func TestRechargeThenPurchaseEndToEnd(t *testing.T) {
 	if err = db.DB.QueryRow("SELECT balance_fen FROM users WHERE email=?", "flow@example.com").Scan(&balance); err != nil {
 		t.Fatal(err)
 	}
-	if balance != 40 {
-		t.Fatalf("balance=%d, want 40", balance)
+	if balance != 0 {
+		t.Fatalf("balance=%d, want unchanged balance 0", balance)
+	}
+}
+
+func TestYishoumiSMSPaymentCallbackAcquiresOnlyOnce(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "direct-payment.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	u, _, err := db.Register("direct@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	o := store.SMSOrder{ID: "SDIRECT", UserID: u.ID, Country: "6", Service: "tg", UpstreamCost: .5, PriceFen: 460, AutoReplace: true, CreatedAt: now}
+	payment := store.Recharge{ID: "PDIRECT", UserID: u.ID, AmountFen: 460, Provider: "yishoumi", PayType: "2", Token: "token", Reference: o.ID, CreatedAt: now}
+	if err = db.CreateSMSPayment(u, o, payment); err != nil {
+		t.Fatal(err)
+	}
+	acquireCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("action") != "getNumberV2" {
+			http.Error(w, "unexpected action", http.StatusBadRequest)
+			return
+		}
+		acquireCalls++
+		_ = json.NewEncoder(w).Encode(map[string]any{"activationId": "paid-activation", "phoneNumber": "628002", "activationCost": .5})
+	}))
+	defer upstream.Close()
+	cfg := config.Config{HeroKey: "key", HeroURL: upstream.URL, HeroCurrency: "840", PayProvider: "yishoumi", YSMAppID: "app-1", YSMSecret: "secret"}
+	h := New(cfg, db).Routes()
+	values := url.Values{"appid": {"app-1"}, "mch_orderid": {payment.ID}, "total_fee": {"460"}, "ysm_orderid": {"ysm-direct-1"}, "state": {"SUCCESS"}}
+	values.Set("sign", yishoumi.Sign(values, cfg.YSMSecret))
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/payments/yishoumi/notify", strings.NewReader(values.Encode()))
+		req.Header.Set("content-type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "success" {
+			t.Fatalf("callback %d: status=%d body=%q", i, w.Code, w.Body.String())
+		}
+	}
+	got, err := db.GetSMS(o.ID, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acquireCalls != 1 || got.Phone != "628002" || got.Status != "waiting" {
+		t.Fatalf("acquireCalls=%d order=%+v", acquireCalls, got)
+	}
+	var balance int64
+	if err = db.DB.QueryRow("SELECT balance_fen FROM users WHERE id=?", u.ID).Scan(&balance); err != nil {
+		t.Fatal(err)
+	}
+	if balance != 0 {
+		t.Fatalf("direct payment unexpectedly credited balance: %d", balance)
+	}
+}
+
+func TestUnlimitedAutoReplaceCancelsBeforeEveryAcquireAndStopsOnCode(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "unlimited-replace.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	u, _, err := db.Register("unlimited@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.DB.Exec("UPDATE users SET balance_fen=1000 WHERE id=?", u.ID); err != nil {
+		t.Fatal(err)
+	}
+	o := store.SMSOrder{ID: "SUNLIMITED", UserID: u.ID, Country: "6", Service: "tg", UpstreamCost: .5, PriceFen: 460, AutoReplace: true, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	if err = db.CreateSMS(u, o); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.ActivateSMS(o.ID, "activation-0", "10000", .5); err != nil {
+		t.Fatal(err)
+	}
+	var actions []string
+	statusCalls, acquireCalls := 0, 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		action := r.URL.Query().Get("action")
+		actions = append(actions, action)
+		switch action {
+		case "getStatus":
+			statusCalls++
+			if statusCalls == 3 {
+				w.Write([]byte("STATUS_OK:654321"))
+			} else {
+				w.Write([]byte("STATUS_WAIT_CODE"))
+			}
+		case "setStatus":
+			w.Write([]byte("ACCESS_CANCEL"))
+		case "getNumberV2":
+			acquireCalls++
+			_ = json.NewEncoder(w).Encode(map[string]any{"activationId": fmt.Sprintf("activation-%d", acquireCalls), "phoneNumber": fmt.Sprintf("1000%d", acquireCalls), "activationCost": .5})
+		default:
+			http.Error(w, "unexpected action", http.StatusBadRequest)
+		}
+	}))
+	defer upstream.Close()
+	s := New(config.Config{HeroKey: "key", HeroURL: upstream.URL, HeroCurrency: "840", AutoReplaceAfter: 2 * time.Minute, AutoReplaceMax: 0}, db)
+	for i := 0; i < 3; i++ {
+		if _, err = db.DB.Exec("UPDATE sms_orders SET last_number_at=? WHERE id=?", time.Now().Add(-3*time.Minute).UTC().Format(time.RFC3339), o.ID); err != nil {
+			t.Fatal(err)
+		}
+		s.runAutoReplaceBatch(t.Context())
+	}
+	got, err := db.GetSMS(o.ID, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantActions := "getStatus,setStatus,getNumberV2,getStatus,setStatus,getNumberV2,getStatus"
+	if strings.Join(actions, ",") != wantActions {
+		t.Fatalf("actions=%v, want %s", actions, wantActions)
+	}
+	if got.Code != "654321" || got.Status != "code_received" || got.ReplaceAttempts != 2 {
+		t.Fatalf("unexpected final order: %+v", got)
 	}
 }
 
@@ -252,42 +372,6 @@ func TestYishoumiNotifyRejectsWhenProviderIsDisabled(t *testing.T) {
 	}
 }
 
-func TestYishoumiNotifyCreditsOnce(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "web.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	u, _, err := db.Register("notify@example.com", "password123")
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := store.Recharge{ID: "RNOTIFY", UserID: u.ID, AmountFen: 1234, Provider: "yishoumi", PayType: "2", Token: "token", CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	if err = db.CreateRecharge(r); err != nil {
-		t.Fatal(err)
-	}
-	cfg := config.Config{YSMAppID: "app-1", YSMSecret: "secret", PayProvider: "yishoumi"}
-	h := New(cfg, db).Routes()
-	values := url.Values{"appid": {"app-1"}, "mch_orderid": {r.ID}, "total_fee": {"1234"}, "transaction_id": {"wx-1"}, "ysm_orderid": {"ysm-1"}, "state": {"SUCCESS"}, "time": {"1710000000"}, "nonce_str": {"abc123"}}
-	values.Set("sign", yishoumi.Sign(values, cfg.YSMSecret))
-	for i := 0; i < 2; i++ {
-		req := httptest.NewRequest(http.MethodPost, "/api/payments/yishoumi/notify", strings.NewReader(values.Encode()))
-		req.Header.Set("content-type", "application/x-www-form-urlencoded")
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, req)
-		if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "success" {
-			t.Fatalf("callback %d: status=%d body=%q", i, w.Code, w.Body.String())
-		}
-	}
-	var balance int64
-	if err = db.DB.QueryRow("SELECT balance_fen FROM users WHERE id=?", u.ID).Scan(&balance); err != nil {
-		t.Fatal(err)
-	}
-	if balance != 1234 {
-		t.Fatalf("balance=%d, want 1234", balance)
-	}
-}
-
 func TestYishoumiNotifyRejectsWrongAmount(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "web.db"))
 	if err != nil {
@@ -295,8 +379,10 @@ func TestYishoumiNotifyRejectsWrongAmount(t *testing.T) {
 	}
 	defer db.Close()
 	u, _, _ := db.Register("wrong@example.com", "password123")
-	r := store.Recharge{ID: "RWRONG", UserID: u.ID, AmountFen: 500, Provider: "yishoumi", PayType: "2", Token: "token", CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	if err = db.CreateRecharge(r); err != nil {
+	now := time.Now().UTC().Format(time.RFC3339)
+	o := store.SMSOrder{ID: "SWRONG", UserID: u.ID, Country: "6", Service: "tg", UpstreamCost: .5, PriceFen: 500, AutoReplace: true, CreatedAt: now}
+	r := store.Recharge{ID: "PWRONG", UserID: u.ID, AmountFen: 500, Provider: "yishoumi", PayType: "2", Token: "token", Reference: o.ID, CreatedAt: now}
+	if err = db.CreateSMSPayment(u, o, r); err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.Config{YSMAppID: "app-1", YSMSecret: "secret", PayProvider: "yishoumi"}

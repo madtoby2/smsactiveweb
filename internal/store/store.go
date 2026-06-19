@@ -32,7 +32,8 @@ type SMSOrder struct {
 type Recharge struct {
 	ID                                                      string `json:"id"`
 	UserID, AmountFen                                       int64
-	Provider, PayType, Status, ProviderID, Token, CreatedAt string
+	Provider, PayType, Status, ProviderID, Token, Reference string
+	CreatedAt                                               string
 }
 
 const sessionLifetime = 30 * 24 * time.Hour
@@ -52,7 +53,7 @@ CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,email TEXT NOT NULL UNIQ
 CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL,expires_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS sms_orders(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,upstream_id TEXT UNIQUE,country TEXT NOT NULL,service TEXT NOT NULL,phone TEXT,status TEXT NOT NULL,code TEXT,upstream_cost REAL NOT NULL,price_fen INTEGER NOT NULL,refunded INTEGER NOT NULL DEFAULT 0,auto_replace INTEGER NOT NULL DEFAULT 0,replace_attempts INTEGER NOT NULL DEFAULT 0,last_number_at TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS sms_attempts(id INTEGER PRIMARY KEY,order_id TEXT NOT NULL,upstream_id TEXT NOT NULL UNIQUE,phone TEXT NOT NULL,status TEXT NOT NULL,upstream_cost REAL NOT NULL,started_at TEXT NOT NULL,ended_at TEXT,FOREIGN KEY(order_id) REFERENCES sms_orders(id));
-CREATE TABLE IF NOT EXISTS recharges(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,amount_fen INTEGER NOT NULL,provider TEXT NOT NULL,pay_type TEXT NOT NULL,status TEXT NOT NULL,provider_id TEXT,token TEXT NOT NULL,created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id));
+CREATE TABLE IF NOT EXISTS recharges(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,amount_fen INTEGER NOT NULL,provider TEXT NOT NULL,pay_type TEXT NOT NULL,status TEXT NOT NULL,provider_id TEXT,token TEXT NOT NULL,reference TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS ledger(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,amount_fen INTEGER NOT NULL,kind TEXT NOT NULL,reference TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id));`)
 	if err != nil {
 		db.Close()
@@ -62,6 +63,7 @@ CREATE TABLE IF NOT EXISTS ledger(id INTEGER PRIMARY KEY,user_id INTEGER NOT NUL
 		"ALTER TABLE sms_orders ADD COLUMN auto_replace INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE sms_orders ADD COLUMN replace_attempts INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE sms_orders ADD COLUMN last_number_at TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE recharges ADD COLUMN reference TEXT NOT NULL DEFAULT ''",
 	} {
 		if _, e := db.Exec(migration); e != nil && !strings.Contains(strings.ToLower(e.Error()), "duplicate column") {
 			db.Close()
@@ -187,6 +189,21 @@ func (s *Store) CreateSMS(u User, o SMSOrder) error {
 	}
 	return tx.Commit()
 }
+
+func (s *Store) CreateSMSPayment(u User, o SMSOrder, p Recharge) error {
+	tx, e := s.DB.Begin()
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	if _, e = tx.Exec(`INSERT INTO sms_orders(id,user_id,country,service,status,upstream_cost,price_fen,auto_replace,created_at)VALUES(?,?,?,?,?,?,?,?,?)`, o.ID, u.ID, o.Country, o.Service, "awaiting_payment", o.UpstreamCost, o.PriceFen, o.AutoReplace, o.CreatedAt); e != nil {
+		return e
+	}
+	if _, e = tx.Exec(`INSERT INTO recharges(id,user_id,amount_fen,provider,pay_type,status,token,reference,created_at)VALUES(?,?,?,?,?,'pending',?,?,?)`, p.ID, u.ID, p.AmountFen, p.Provider, p.PayType, p.Token, o.ID, p.CreatedAt); e != nil {
+		return e
+	}
+	return tx.Commit()
+}
 func (s *Store) ActivateSMS(id, upstream, phone string, cost float64) error {
 	tx, e := s.DB.Begin()
 	if e != nil {
@@ -233,6 +250,11 @@ func (s *Store) GetSMS(id string, uid int64) (SMSOrder, error) {
 	e := s.DB.QueryRow(`SELECT id,user_id,COALESCE(upstream_id,''),country,service,COALESCE(phone,''),status,COALESCE(code,''),upstream_cost,price_fen,auto_replace,replace_attempts,last_number_at,created_at FROM sms_orders WHERE id=? AND user_id=?`, id, uid).Scan(&o.ID, &o.UserID, &o.UpstreamID, &o.Country, &o.Service, &o.Phone, &o.Status, &o.Code, &o.UpstreamCost, &o.PriceFen, &o.AutoReplace, &o.ReplaceAttempts, &o.LastNumberAt, &o.CreatedAt)
 	return o, e
 }
+func (s *Store) GetSMSByID(id string) (SMSOrder, error) {
+	var o SMSOrder
+	e := s.DB.QueryRow(`SELECT id,user_id,COALESCE(upstream_id,''),country,service,COALESCE(phone,''),status,COALESCE(code,''),upstream_cost,price_fen,auto_replace,replace_attempts,last_number_at,created_at FROM sms_orders WHERE id=?`, id).Scan(&o.ID, &o.UserID, &o.UpstreamID, &o.Country, &o.Service, &o.Phone, &o.Status, &o.Code, &o.UpstreamCost, &o.PriceFen, &o.AutoReplace, &o.ReplaceAttempts, &o.LastNumberAt, &o.CreatedAt)
+	return o, e
+}
 func (s *Store) UpdateSMS(id, status, code string) error {
 	_, e := s.DB.Exec("UPDATE sms_orders SET status=?,code=CASE WHEN ?='' THEN code ELSE ? END WHERE id=?", status, code, code, id)
 	return e
@@ -254,8 +276,39 @@ func (s *Store) ListSMS(uid int64) ([]SMSOrder, error) {
 	return out, rows.Err()
 }
 
+func (s *Store) ListPaidSMS(limit int) ([]SMSOrder, error) {
+	rows, e := s.DB.Query(`SELECT id,user_id,COALESCE(upstream_id,''),country,service,COALESCE(phone,''),status,COALESCE(code,''),upstream_cost,price_fen,auto_replace,replace_attempts,last_number_at,created_at FROM sms_orders WHERE status='paid' ORDER BY created_at LIMIT ?`, limit)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	var out []SMSOrder
+	for rows.Next() {
+		var o SMSOrder
+		if e = rows.Scan(&o.ID, &o.UserID, &o.UpstreamID, &o.Country, &o.Service, &o.Phone, &o.Status, &o.Code, &o.UpstreamCost, &o.PriceFen, &o.AutoReplace, &o.ReplaceAttempts, &o.LastNumberAt, &o.CreatedAt); e != nil {
+			return nil, e
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ClaimPaidSMS(id string) (bool, error) {
+	r, e := s.DB.Exec("UPDATE sms_orders SET status='purchasing' WHERE id=? AND status='paid'", id)
+	if e != nil {
+		return false, e
+	}
+	n, e := r.RowsAffected()
+	return n == 1, e
+}
+
+func (s *Store) ReleasePaidSMS(id string) error {
+	_, e := s.DB.Exec("UPDATE sms_orders SET status='paid' WHERE id=? AND status='purchasing'", id)
+	return e
+}
+
 func (s *Store) ListDueAutoReplace(before string, max, limit int) ([]SMSOrder, error) {
-	rows, e := s.DB.Query(`SELECT id,user_id,COALESCE(upstream_id,''),country,service,COALESCE(phone,''),status,COALESCE(code,''),upstream_cost,price_fen,auto_replace,replace_attempts,last_number_at,created_at FROM sms_orders WHERE auto_replace=1 AND status='waiting' AND COALESCE(code,'')='' AND replace_attempts<? AND last_number_at<>'' AND last_number_at<=? ORDER BY last_number_at LIMIT ?`, max, before, limit)
+	rows, e := s.DB.Query(`SELECT id,user_id,COALESCE(upstream_id,''),country,service,COALESCE(phone,''),status,COALESCE(code,''),upstream_cost,price_fen,auto_replace,replace_attempts,last_number_at,created_at FROM sms_orders WHERE auto_replace=1 AND status='waiting' AND COALESCE(code,'')='' AND (?=0 OR replace_attempts<?) AND last_number_at<>'' AND last_number_at<=? ORDER BY last_number_at LIMIT ?`, max, max, before, limit)
 	if e != nil {
 		return nil, e
 	}
@@ -302,6 +355,11 @@ func (s *Store) ReleaseAutoReplace(id string, disable bool) error {
 	return e
 }
 
+func (s *Store) TouchReplacing(id string) error {
+	_, e := s.DB.Exec("UPDATE sms_orders SET last_number_at=? WHERE id=? AND status='replacing'", time.Now().UTC().Format(time.RFC3339), id)
+	return e
+}
+
 func (s *Store) ReplaceActivation(id, oldUpstream, upstream, phone string, cost float64) error {
 	tx, e := s.DB.Begin()
 	if e != nil {
@@ -327,17 +385,69 @@ func (s *Store) EndCurrentAttempt(id, upstream, status string) error {
 }
 
 func (s *Store) CreateRecharge(r Recharge) error {
-	_, e := s.DB.Exec(`INSERT INTO recharges(id,user_id,amount_fen,provider,pay_type,status,token,created_at)VALUES(?,?,?,?,?,'pending',?,?)`, r.ID, r.UserID, r.AmountFen, r.Provider, r.PayType, r.Token, r.CreatedAt)
+	_, e := s.DB.Exec(`INSERT INTO recharges(id,user_id,amount_fen,provider,pay_type,status,token,reference,created_at)VALUES(?,?,?,?,?,'pending',?,?,?)`, r.ID, r.UserID, r.AmountFen, r.Provider, r.PayType, r.Token, r.Reference, r.CreatedAt)
 	return e
 }
 func (s *Store) SetRechargeStatus(id, status string) error {
-	_, e := s.DB.Exec("UPDATE recharges SET status=? WHERE id=? AND status='pending'", status, id)
-	return e
+	tx, e := s.DB.Begin()
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	var reference string
+	if e = tx.QueryRow("SELECT reference FROM recharges WHERE id=?", id).Scan(&reference); e != nil {
+		return e
+	}
+	if _, e = tx.Exec("UPDATE recharges SET status=? WHERE id=? AND status='pending'", status, id); e != nil {
+		return e
+	}
+	if reference != "" {
+		if _, e = tx.Exec("UPDATE sms_orders SET status='payment_failed' WHERE id=? AND status='awaiting_payment'", reference); e != nil {
+			return e
+		}
+	}
+	return tx.Commit()
 }
 func (s *Store) GetRecharge(id string) (Recharge, error) {
 	var r Recharge
-	e := s.DB.QueryRow(`SELECT id,user_id,amount_fen,provider,pay_type,status,COALESCE(provider_id,''),token,created_at FROM recharges WHERE id=?`, id).Scan(&r.ID, &r.UserID, &r.AmountFen, &r.Provider, &r.PayType, &r.Status, &r.ProviderID, &r.Token, &r.CreatedAt)
+	e := s.DB.QueryRow(`SELECT id,user_id,amount_fen,provider,pay_type,status,COALESCE(provider_id,''),token,reference,created_at FROM recharges WHERE id=?`, id).Scan(&r.ID, &r.UserID, &r.AmountFen, &r.Provider, &r.PayType, &r.Status, &r.ProviderID, &r.Token, &r.Reference, &r.CreatedAt)
 	return r, e
+}
+func (s *Store) IsSMSPaymentOrder(orderID string) (bool, error) {
+	var exists int
+	e := s.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM recharges WHERE reference=?)", orderID).Scan(&exists)
+	return exists == 1, e
+}
+func (s *Store) CompleteSMSPayment(id, providerID string) (string, error) {
+	tx, e := s.DB.Begin()
+	if e != nil {
+		return "", e
+	}
+	defer tx.Rollback()
+	var reference, status, existingProviderID string
+	e = tx.QueryRow("SELECT reference,status,COALESCE(provider_id,'') FROM recharges WHERE id=?", id).Scan(&reference, &status, &existingProviderID)
+	if e != nil {
+		return "", e
+	}
+	if reference == "" {
+		return "", errors.New("payment is not linked to an SMS order")
+	}
+	if status == "paid" {
+		if providerID != "" && existingProviderID != "" && providerID != existingProviderID {
+			return "", errors.New("provider transaction mismatch")
+		}
+		return reference, tx.Commit()
+	}
+	if status != "pending" {
+		return "", errors.New("payment is not pending")
+	}
+	if _, e = tx.Exec("UPDATE recharges SET status='paid',provider_id=CASE WHEN ?='' THEN provider_id ELSE ? END WHERE id=?", providerID, providerID, id); e != nil {
+		return "", e
+	}
+	if _, e = tx.Exec("UPDATE sms_orders SET status='paid' WHERE id=? AND status='awaiting_payment'", reference); e != nil {
+		return "", e
+	}
+	return reference, tx.Commit()
 }
 func (s *Store) CreditRecharge(id, providerID string) error {
 	tx, e := s.DB.Begin()
@@ -346,10 +456,13 @@ func (s *Store) CreditRecharge(id, providerID string) error {
 	}
 	defer tx.Rollback()
 	var uid, amount int64
-	var status, existingProviderID string
-	e = tx.QueryRow("SELECT user_id,amount_fen,status,COALESCE(provider_id,'') FROM recharges WHERE id=?", id).Scan(&uid, &amount, &status, &existingProviderID)
+	var status, existingProviderID, reference string
+	e = tx.QueryRow("SELECT user_id,amount_fen,status,COALESCE(provider_id,''),reference FROM recharges WHERE id=?", id).Scan(&uid, &amount, &status, &existingProviderID, &reference)
 	if e != nil {
 		return e
+	}
+	if reference != "" {
+		return errors.New("SMS order payments cannot credit account balance")
 	}
 	if status == "paid" {
 		if providerID != "" && existingProviderID != "" && providerID != existingProviderID {

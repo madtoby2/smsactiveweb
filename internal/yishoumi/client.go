@@ -59,7 +59,7 @@ func Verify(v url.Values, secret string) bool {
 	return got != "" && strings.EqualFold(got, Sign(v, secret))
 }
 func (c *Client) Create(ctx context.Context, order string, total int64, payType int, notify, callback string) (CreateResult, error) {
-	v := url.Values{"appid": {c.AppID}, "mch_orderid": {order}, "description": {"Balance recharge"}, "total": {strconv.FormatInt(total, 10)}, "payType": {strconv.Itoa(payType)}, "notify_url": {notify}, "nopay_url": {callback}, "callback_url": {callback}, "time": {strconv.FormatInt(time.Now().Unix(), 10)}, "nonce_str": {fmt.Sprintf("%d", time.Now().UnixNano())}}
+	v := url.Values{"appid": {c.AppID}, "mch_orderid": {order}, "description": {"SMS activation order"}, "total": {strconv.FormatInt(total, 10)}, "payType": {strconv.Itoa(payType)}, "notify_url": {notify}, "nopay_url": {callback}, "callback_url": {callback}, "time": {strconv.FormatInt(time.Now().Unix(), 10)}, "nonce_str": {fmt.Sprintf("%d", time.Now().UnixNano())}}
 	v.Set("sign", Sign(v, c.Secret))
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/u/payment", strings.NewReader(v.Encode()))
 	req.Header.Set("content-type", "application/x-www-form-urlencoded")
