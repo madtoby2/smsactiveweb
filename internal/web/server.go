@@ -316,6 +316,13 @@ func (s *Server) RunAutoReplace(ctx context.Context) {
 	if s.C.AutoReplaceMax == 0 {
 		return
 	}
+	if orders, err := s.Store.ListReplacing(20); err != nil {
+		log.Printf("auto replace recovery scan failed: %v", err)
+	} else {
+		for _, o := range orders {
+			s.replaceNumber(ctx, o)
+		}
+	}
 	ticker := time.NewTicker(s.C.AutoReplaceScan)
 	defer ticker.Stop()
 	s.runAutoReplaceBatch(ctx)
@@ -352,6 +359,10 @@ func (s *Server) replaceNumber(ctx context.Context, o store.SMSOrder) {
 		return
 	}
 	status, code := parseHeroStatus(st)
+	if status == "cancelled" {
+		s.acquireReplacement(ctx, o)
+		return
+	}
 	if code != "" || status != "waiting" {
 		_ = s.Store.UpdateSMS(o.ID, status, code)
 		return
@@ -376,6 +387,10 @@ func (s *Server) replaceNumber(ctx context.Context, o store.SMSOrder) {
 		_ = s.Store.ReleaseAutoReplace(o.ID, false)
 		return
 	}
+	s.acquireReplacement(ctx, o)
+}
+
+func (s *Server) acquireReplacement(ctx context.Context, o store.SMSOrder) {
 	_ = s.Store.EndCurrentAttempt(o.ID, o.UpstreamID, "cancelled")
 	act, err := s.Hero.Acquire(ctx, o.Country, o.Service, o.UpstreamCost)
 	if err != nil {
@@ -462,6 +477,10 @@ func (s *Server) sandboxComplete(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/?recharge="+x.ID, http.StatusSeeOther)
 }
 func (s *Server) ysmNotify(w http.ResponseWriter, r *http.Request) {
+	if s.C.PayProvider != "yishoumi" || s.C.YSMAppID == "" || s.C.YSMSecret == "" {
+		http.Error(w, "payment provider is not configured", http.StatusServiceUnavailable)
+		return
+	}
 	if e := r.ParseForm(); e != nil || !yishoumi.Verify(r.PostForm, s.C.YSMSecret) {
 		http.Error(w, "bad sign", 400)
 		return

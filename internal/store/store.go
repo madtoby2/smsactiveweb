@@ -271,6 +271,23 @@ func (s *Store) ListDueAutoReplace(before string, max, limit int) ([]SMSOrder, e
 	return out, rows.Err()
 }
 
+func (s *Store) ListReplacing(limit int) ([]SMSOrder, error) {
+	rows, e := s.DB.Query(`SELECT id,user_id,COALESCE(upstream_id,''),country,service,COALESCE(phone,''),status,COALESCE(code,''),upstream_cost,price_fen,auto_replace,replace_attempts,last_number_at,created_at FROM sms_orders WHERE status='replacing' ORDER BY last_number_at LIMIT ?`, limit)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	var out []SMSOrder
+	for rows.Next() {
+		var o SMSOrder
+		if e = rows.Scan(&o.ID, &o.UserID, &o.UpstreamID, &o.Country, &o.Service, &o.Phone, &o.Status, &o.Code, &o.UpstreamCost, &o.PriceFen, &o.AutoReplace, &o.ReplaceAttempts, &o.LastNumberAt, &o.CreatedAt); e != nil {
+			return nil, e
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) ClaimAutoReplace(id, upstream string) (bool, error) {
 	r, e := s.DB.Exec("UPDATE sms_orders SET status='replacing' WHERE id=? AND upstream_id=? AND status='waiting' AND COALESCE(code,'')=''", id, upstream)
 	if e != nil {
