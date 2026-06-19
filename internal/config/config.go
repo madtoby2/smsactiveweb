@@ -14,6 +14,7 @@ type Config struct {
 	Port, BaseURL, HeroKey, HeroURL, HeroCurrency string
 	USDCNY, Markup                                float64
 	PayProvider, YSMAppID, YSMSecret, YSMURL      string
+	EPayPID, EPayKey, EPayURL                    string
 	AllowLiveSMSInSandbox                         bool
 	AutoReplaceAfter, AutoReplaceScan             time.Duration
 	AutoReplaceMax                                int
@@ -41,6 +42,19 @@ func (c Config) Validate() error {
 			return fmt.Errorf("APP_BASE_URL must be a public HTTPS URL for yishoumi callbacks")
 		}
 		return nil
+	case "epay", "50pay":
+		if c.EPayPID == "" || c.EPayKey == "" {
+			return fmt.Errorf("EPAY_PID and EPAY_KEY are required for 50Pay")
+		}
+		u, err := url.Parse(c.BaseURL)
+		if err != nil || u.Scheme != "https" || u.Host == "" {
+			return fmt.Errorf("APP_BASE_URL must be a public HTTPS URL for 50Pay callbacks")
+		}
+		endpoint, err := url.Parse(c.EPayURL)
+		if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" {
+			return fmt.Errorf("EPAY_BASE_URL must be HTTPS")
+		}
+		return nil
 	default:
 		return fmt.Errorf("unsupported PAY_PROVIDER %q", c.PayProvider)
 	}
@@ -53,6 +67,7 @@ func Load() Config {
 		HeroKey: os.Getenv("HEROSMS_API_KEY"), HeroURL: env("HEROSMS_BASE_URL", "https://hero-sms.com/stubs/handler_api.php"), HeroCurrency: env("HEROSMS_CURRENCY", "840"),
 		USDCNY: envFloat("USD_CNY_RATE", 7.2), Markup: envFloat("PRICE_MARKUP_CNY", 1),
 		PayProvider: env("PAY_PROVIDER", "sandbox"), YSMAppID: os.Getenv("YSM_APP_ID"), YSMSecret: os.Getenv("YSM_SECRET"), YSMURL: env("YSM_BASE_URL", "https://www.yishoumi.cn"),
+		EPayPID: os.Getenv("EPAY_PID"), EPayKey: os.Getenv("EPAY_KEY"), EPayURL: env("EPAY_BASE_URL", "https://50pay.xiajuan88.com"),
 		AllowLiveSMSInSandbox: env("ALLOW_LIVE_SMS_IN_SANDBOX", "false") == "true",
 		AutoReplaceAfter:      time.Duration(envInt("SMS_AUTO_REPLACE_AFTER_SECONDS", 180)) * time.Second,
 		AutoReplaceMax:        envInt("SMS_AUTO_REPLACE_MAX_ATTEMPTS", 0),

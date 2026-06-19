@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"sms-platform/internal/config"
+	"sms-platform/internal/epay"
 	"sms-platform/internal/hero"
 	"sms-platform/internal/pricing"
 	"sms-platform/internal/store"
@@ -29,6 +30,7 @@ type Server struct {
 	Store *store.Store
 	Hero  *hero.Client
 	YSM   *yishoumi.Client
+	EPay  *epay.Client
 }
 type handler func(http.ResponseWriter, *http.Request, store.User)
 
@@ -45,7 +47,7 @@ func New(c config.Config, s *store.Store) *Server {
 	if c.AutoReplaceScan < time.Second {
 		c.AutoReplaceScan = 10 * time.Second
 	}
-	return &Server{c, s, hero.New(c.HeroKey, c.HeroURL, c.HeroCurrency), yishoumi.New(c.YSMAppID, c.YSMSecret, c.YSMURL)}
+	return &Server{c, s, hero.New(c.HeroKey, c.HeroURL, c.HeroCurrency), yishoumi.New(c.YSMAppID, c.YSMSecret, c.YSMURL), epay.New(c.EPayPID, c.EPayKey, c.EPayURL)}
 }
 func (s *Server) Routes() http.Handler {
 	m := http.NewServeMux()
@@ -64,6 +66,8 @@ func (s *Server) Routes() http.Handler {
 	m.HandleFunc("GET /sandbox/pay/{id}", s.sandboxPay)
 	m.HandleFunc("POST /sandbox/pay/{id}", s.sandboxComplete)
 	m.HandleFunc("POST /api/payments/yishoumi/notify", s.ysmNotify)
+	m.HandleFunc("GET /api/payments/epay/notify", s.epayNotify)
+	m.HandleFunc("GET /api/payments/epay/return", s.epayReturn)
 	return security(m)
 }
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -246,6 +250,16 @@ func (s *Server) purchase(w http.ResponseWriter, r *http.Request, u store.User) 
 	}
 	if s.C.PayProvider == "sandbox" {
 		jsonOut(w, 201, map[string]any{"id": o.ID, "paymentId": payment.ID, "priceFen": o.PriceFen, "checkoutUrl": fmt.Sprintf("/sandbox/pay/%s?token=%s", payment.ID, url.QueryEscape(raw))})
+		return
+	}
+	if s.C.PayProvider == "epay" || s.C.PayProvider == "50pay" {
+		checkoutURL, err := s.EPay.CheckoutURL(payment.ID, o.PriceFen, in.PayType, s.C.BaseURL+"/api/payments/epay/notify", s.C.BaseURL+"/api/payments/epay/return")
+		if err != nil {
+			_ = s.Store.SetRechargeStatus(payment.ID, "failed")
+			fail(w, 502, err)
+			return
+		}
+		jsonOut(w, 201, map[string]any{"id": o.ID, "paymentId": payment.ID, "priceFen": o.PriceFen, "checkoutUrl": checkoutURL})
 		return
 	}
 	if s.C.PayProvider != "yishoumi" || s.C.YSMAppID == "" || s.C.YSMSecret == "" {
@@ -531,4 +545,55 @@ func (s *Server) ysmNotify(w http.ResponseWriter, r *http.Request) {
 		s.fulfillPaidOrder(r.Context(), order)
 	}
 	w.Write([]byte("success"))
+}
+
+func (s *Server) epayNotify(w http.ResponseWriter, r *http.Request) {
+	orderID, err := s.completeEpayPayment(r)
+	if err != nil {
+		log.Printf("50Pay notify rejected: %v", err)
+		http.Error(w, "fail", http.StatusBadRequest)
+		return
+	}
+	if order, err := s.Store.GetSMSByID(orderID); err == nil {
+		s.fulfillPaidOrder(r.Context(), order)
+	}
+	w.Write([]byte("success"))
+}
+
+func (s *Server) epayReturn(w http.ResponseWriter, r *http.Request) {
+	orderID, err := s.completeEpayPayment(r)
+	if err != nil {
+		http.Error(w, "payment verification failed", http.StatusBadRequest)
+		return
+	}
+	if order, err := s.Store.GetSMSByID(orderID); err == nil {
+		s.fulfillPaidOrder(r.Context(), order)
+	}
+	http.Redirect(w, r, "/?order="+url.QueryEscape(orderID), http.StatusSeeOther)
+}
+
+func (s *Server) completeEpayPayment(r *http.Request) (string, error) {
+	if s.C.PayProvider != "epay" && s.C.PayProvider != "50pay" {
+		return "", fmt.Errorf("50Pay is not enabled")
+	}
+	values := r.URL.Query()
+	if values.Get("pid") != s.C.EPayPID || !strings.EqualFold(values.Get("sign_type"), "MD5") || !epay.Verify(values, s.C.EPayKey) {
+		return "", fmt.Errorf("invalid 50Pay signature")
+	}
+	if values.Get("trade_status") != "TRADE_SUCCESS" {
+		return "", fmt.Errorf("unexpected 50Pay status")
+	}
+	payment, err := s.Store.GetRecharge(values.Get("out_trade_no"))
+	if err != nil || payment.Reference == "" || payment.Provider != s.C.PayProvider {
+		return "", fmt.Errorf("unknown 50Pay order")
+	}
+	amountFen, err := epay.ParseMoneyFen(values.Get("money"))
+	if err != nil || amountFen != payment.AmountFen {
+		return "", fmt.Errorf("50Pay amount mismatch")
+	}
+	tradeNo := values.Get("trade_no")
+	if tradeNo == "" {
+		return "", fmt.Errorf("missing 50Pay transaction")
+	}
+	return s.Store.CompleteSMSPayment(payment.ID, tradeNo)
 }
