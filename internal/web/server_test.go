@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,6 +14,93 @@ import (
 	"sms-platform/internal/store"
 	"sms-platform/internal/yishoumi"
 )
+
+func TestAutoReplaceCancelsThenAcquiresWithoutChargingAgain(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "replace.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	u, _, err := db.Register("replace@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.DB.Exec("UPDATE users SET balance_fen=1000 WHERE id=?", u.ID); err != nil {
+		t.Fatal(err)
+	}
+	o := store.SMSOrder{ID: "SREPLACE", UserID: u.ID, Country: "6", Service: "tg", UpstreamCost: .5, PriceFen: 460, AutoReplace: true, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	if err = db.CreateSMS(u, o); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.ActivateSMS(o.ID, "old-id", "10001", .5); err != nil {
+		t.Fatal(err)
+	}
+	var actions []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		action := r.URL.Query().Get("action")
+		actions = append(actions, action)
+		switch action {
+		case "getStatus":
+			w.Write([]byte("STATUS_WAIT_CODE"))
+		case "setStatus":
+			w.Write([]byte("ACCESS_CANCEL"))
+		case "getNumberV2":
+			_ = json.NewEncoder(w).Encode(map[string]any{"activationId": "new-id", "phoneNumber": "10002", "activationCost": .5})
+		default:
+			http.Error(w, "unexpected", 400)
+		}
+	}))
+	defer upstream.Close()
+	s := New(config.Config{HeroKey: "key", HeroURL: upstream.URL, HeroCurrency: "840", AutoReplaceMax: 2}, db)
+	current, _ := db.GetSMS(o.ID, u.ID)
+	claimed, err := db.ClaimAutoReplace(o.ID, current.UpstreamID)
+	if err != nil || !claimed {
+		t.Fatalf("claim=%v err=%v", claimed, err)
+	}
+	s.replaceNumber(t.Context(), current)
+	got, err := db.GetSMS(o.ID, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UpstreamID != "new-id" || got.Phone != "10002" || got.ReplaceAttempts != 1 || got.Status != "waiting" {
+		t.Fatalf("unexpected replacement: %+v", got)
+	}
+	var balance int64
+	if err = db.DB.QueryRow("SELECT balance_fen FROM users WHERE id=?", u.ID).Scan(&balance); err != nil {
+		t.Fatal(err)
+	}
+	if balance != 540 {
+		t.Fatalf("balance=%d, want 540", balance)
+	}
+	want := []string{"getStatus", "setStatus", "getNumberV2"}
+	if strings.Join(actions, ",") != strings.Join(want, ",") {
+		t.Fatalf("actions=%v, want %v", actions, want)
+	}
+}
+
+func TestAuthenticatedRequestRefreshesPersistentSessionCookie(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "session.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, token, err := db.Register("cookie@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(config.Config{PayProvider: "sandbox"}, db).Routes()
+	req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+	req.AddCookie(&http.Cookie{Name: "session", Value: token})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	cookies := w.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != "session" || cookies[0].HttpOnly != true || cookies[0].MaxAge != 30*86400 {
+		t.Fatalf("unexpected session cookies: %+v", cookies)
+	}
+}
 
 func TestYishoumiNotifyCreditsOnce(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "web.db"))

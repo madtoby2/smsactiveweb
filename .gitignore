@@ -2,5 +2,6 @@
 data/
 *.log
 app.exe
+*.exe~
 .test-*
 server.pid

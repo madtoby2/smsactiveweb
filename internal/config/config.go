@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -12,6 +13,8 @@ type Config struct {
 	USDCNY, Markup                                float64
 	PayProvider, YSMAppID, YSMSecret, YSMURL      string
 	AllowLiveSMSInSandbox                         bool
+	AutoReplaceAfter, AutoReplaceScan             time.Duration
+	AutoReplaceMax                                int
 }
 
 func Load() Config {
@@ -22,6 +25,9 @@ func Load() Config {
 		USDCNY: envFloat("USD_CNY_RATE", 7.2), Markup: envFloat("PRICE_MARKUP_CNY", 1),
 		PayProvider: env("PAY_PROVIDER", "sandbox"), YSMAppID: os.Getenv("YSM_APP_ID"), YSMSecret: os.Getenv("YSM_SECRET"), YSMURL: env("YSM_BASE_URL", "https://www.yishoumi.cn"),
 		AllowLiveSMSInSandbox: env("ALLOW_LIVE_SMS_IN_SANDBOX", "false") == "true",
+		AutoReplaceAfter:      time.Duration(envInt("SMS_AUTO_REPLACE_AFTER_SECONDS", 180)) * time.Second,
+		AutoReplaceMax:        envInt("SMS_AUTO_REPLACE_MAX_ATTEMPTS", 2),
+		AutoReplaceScan:       time.Duration(envInt("SMS_AUTO_REPLACE_SCAN_SECONDS", 10)) * time.Second,
 	}
 }
 
@@ -53,6 +59,13 @@ func env(k, d string) string {
 }
 func envFloat(k string, d float64) float64 {
 	v, err := strconv.ParseFloat(env(k, ""), 64)
+	if err != nil {
+		return d
+	}
+	return v
+}
+func envInt(k string, d int) int {
+	v, err := strconv.Atoi(env(k, ""))
 	if err != nil {
 		return d
 	}

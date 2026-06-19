@@ -42,3 +42,14 @@ func TestSMSActivateCompatibilityResponses(t *testing.T) {
 		t.Fatalf("activation=%v err=%v", a, err)
 	}
 }
+
+func TestAPIErrorCodeFromJSON(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"title": "FREE_CANCELLATION_EXPIRED"}`))
+	}))
+	defer ts.Close()
+	_, err := New("key", ts.URL, "840").SetStatus(context.Background(), "123", "8")
+	if ErrorCode(err) != "FREE_CANCELLATION_EXPIRED" {
+		t.Fatalf("code=%q err=%v", ErrorCode(err), err)
+	}
+}

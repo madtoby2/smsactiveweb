@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"sms-platform/internal/config"
@@ -18,7 +19,9 @@ func main() {
 		log.Fatal(e)
 	}
 	defer s.Close()
-	srv := &http.Server{Addr: ":" + c.Port, Handler: webapp.New(c, s).Routes(), ReadHeaderTimeout: 5e9, ReadTimeout: 15e9, WriteTimeout: 30e9, IdleTimeout: 60e9}
+	app := webapp.New(c, s)
+	go app.RunAutoReplace(context.Background())
+	srv := &http.Server{Addr: ":" + c.Port, Handler: app.Routes(), ReadHeaderTimeout: 5e9, ReadTimeout: 15e9, WriteTimeout: 30e9, IdleTimeout: 60e9}
 	log.Printf("平台已启动: %s", c.BaseURL)
 	log.Fatal(srv.ListenAndServe())
 }

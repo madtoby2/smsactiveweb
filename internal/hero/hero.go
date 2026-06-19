@@ -3,6 +3,7 @@ package hero
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,6 +35,17 @@ type Offer struct {
 type Activation struct {
 	ID, Phone string
 	Cost      float64
+}
+
+type APIError struct{ Code string }
+
+func (e *APIError) Error() string { return "HeroSMS: " + e.Code }
+func ErrorCode(err error) string {
+	var e *APIError
+	if errors.As(err, &e) {
+		return e.Code
+	}
+	return ""
 }
 
 func New(key, baseURL, currency string) *Client {
@@ -68,9 +80,14 @@ func (c *Client) call(ctx context.Context, action string, params map[string]stri
 		return nil, fmt.Errorf("HeroSMS HTTP %d", resp.StatusCode)
 	}
 	s := strings.TrimSpace(string(b))
-	for _, p := range []string{"BAD_KEY", "BAD_ACTION", "BAD_SERVICE", "BAD_COUNTRY", "NO_NUMBERS", "NO_BALANCE", "WRONG_ACTIVATION_ID", "EARLY_CANCEL_DENIED"} {
-		if strings.HasPrefix(s, p) || strings.Contains(s, `"title":"`+p+`"`) {
-			return nil, fmt.Errorf("HeroSMS: %s", p)
+	known := []string{"BAD_KEY", "BAD_ACTION", "BAD_SERVICE", "BAD_COUNTRY", "NO_NUMBERS", "NO_BALANCE", "WRONG_ACTIVATION_ID", "EARLY_CANCEL_DENIED", "FREE_CANCELLATION_EXPIRED", "OTP_RECEIVED", "NEW_OTP_RECEIVED"}
+	var payload struct {
+		Title string `json:"title"`
+	}
+	_ = json.Unmarshal(b, &payload)
+	for _, p := range known {
+		if strings.HasPrefix(s, p) || payload.Title == p {
+			return nil, &APIError{Code: p}
 		}
 	}
 	return b, nil

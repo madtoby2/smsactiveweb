@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -32,6 +33,18 @@ type Server struct {
 type handler func(http.ResponseWriter, *http.Request, store.User)
 
 func New(c config.Config, s *store.Store) *Server {
+	if c.AutoReplaceAfter < 2*time.Minute {
+		c.AutoReplaceAfter = 2 * time.Minute
+	}
+	if c.AutoReplaceAfter > 15*time.Minute {
+		c.AutoReplaceAfter = 15 * time.Minute
+	}
+	if c.AutoReplaceMax < 0 {
+		c.AutoReplaceMax = 0
+	}
+	if c.AutoReplaceScan < time.Second {
+		c.AutoReplaceScan = 10 * time.Second
+	}
 	return &Server{c, s, hero.New(c.HeroKey, c.HeroURL, c.HeroCurrency), yishoumi.New(c.YSMAppID, c.YSMSecret, c.YSMURL)}
 }
 func (s *Server) Routes() http.Handler {
@@ -97,11 +110,13 @@ func (s *Server) auth(next handler) http.HandlerFunc {
 			fail(w, 401, "登录已过期")
 			return
 		}
+		_ = s.Store.TouchSession(c.Value)
+		setSession(w, c.Value, strings.HasPrefix(s.C.BaseURL, "https://"))
 		next(w, r, u)
 	}
 }
 func setSession(w http.ResponseWriter, token string, secure bool) {
-	http.SetCookie(w, &http.Cookie{Name: "session", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: secure, MaxAge: 7 * 86400})
+	http.SetCookie(w, &http.Cookie{Name: "session", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: secure, MaxAge: 30 * 86400})
 }
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	var in struct{ Email, Password string }
@@ -137,12 +152,15 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 200, u)
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	if c, e := r.Cookie("session"); e == nil {
+		_ = s.Store.DeleteSession(c.Value)
+	}
 	http.SetCookie(w, &http.Cookie{Name: "session", Path: "/", MaxAge: -1, HttpOnly: true})
 	jsonOut(w, 200, map[string]bool{"ok": true})
 }
 func (s *Server) me(w http.ResponseWriter, r *http.Request, u store.User) {
 	liveSMSPurchaseEnabled := s.C.PayProvider != "sandbox" || s.C.AllowLiveSMSInSandbox
-	jsonOut(w, 200, map[string]any{"user": u, "pricing": map[string]any{"markupCNY": s.C.Markup, "usdCnyRate": s.C.USDCNY}, "paymentProvider": s.C.PayProvider, "liveSmsPurchaseEnabled": liveSMSPurchaseEnabled})
+	jsonOut(w, 200, map[string]any{"user": u, "pricing": map[string]any{"markupCNY": s.C.Markup, "usdCnyRate": s.C.USDCNY}, "paymentProvider": s.C.PayProvider, "liveSmsPurchaseEnabled": liveSMSPurchaseEnabled, "autoReplaceMax": s.C.AutoReplaceMax})
 }
 
 func (s *Server) catalog(w http.ResponseWriter, r *http.Request, u store.User) {
@@ -189,7 +207,10 @@ func (s *Server) purchase(w http.ResponseWriter, r *http.Request, u store.User) 
 		fail(w, http.StatusServiceUnavailable, "sandbox payments cannot purchase live HeroSMS numbers")
 		return
 	}
-	var in struct{ Country, Service string }
+	var in struct {
+		Country, Service string
+		AutoReplace      bool `json:"autoReplace"`
+	}
 	if decode(r, &in) != nil || in.Country == "" || in.Service == "" {
 		fail(w, 400, "请选择国家和服务")
 		return
@@ -210,7 +231,7 @@ func (s *Server) purchase(w http.ResponseWriter, r *http.Request, u store.User) 
 		fail(w, 409, "该服务暂时无库存")
 		return
 	}
-	o := store.SMSOrder{ID: store.ID("S"), UserID: u.ID, Country: in.Country, Service: in.Service, UpstreamCost: offer.Cost, PriceFen: pricing.SaleFen(offer.Cost, s.C.USDCNY, s.C.Markup), CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	o := store.SMSOrder{ID: store.ID("S"), UserID: u.ID, Country: in.Country, Service: in.Service, UpstreamCost: offer.Cost, PriceFen: pricing.SaleFen(offer.Cost, s.C.USDCNY, s.C.Markup), AutoReplace: in.AutoReplace, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
 	if e = s.Store.CreateSMS(u, o); e != nil {
 		fail(w, 409, e)
 		return
@@ -235,7 +256,7 @@ func (s *Server) orderStatus(w http.ResponseWriter, r *http.Request, u store.Use
 		fail(w, 404, "订单不存在")
 		return
 	}
-	if o.UpstreamID != "" && o.Status != "cancelled" && o.Status != "finished" {
+	if o.UpstreamID != "" && o.Status == "waiting" {
 		st, e := s.Hero.Status(r.Context(), o.UpstreamID)
 		if e == nil {
 			status, code := parseHeroStatus(st)
@@ -253,7 +274,7 @@ func parseHeroStatus(st string) (string, string) {
 			return "code_received", p[1]
 		}
 		return "code_received", ""
-	case "STATUS_WAIT_CODE", "STATUS_WAIT_RETRY":
+	case "STATUS_WAIT_CODE", "STATUS_WAIT_RETRY", "STATUS_WAIT_RESEND":
 		return "waiting", ""
 	case "STATUS_CANCEL":
 		return "cancelled", ""
@@ -270,6 +291,10 @@ func (s *Server) cancel(w http.ResponseWriter, r *http.Request, u store.User) {
 		fail(w, 409, "已收到验证码，不能取消")
 		return
 	}
+	if o.Status != "waiting" {
+		fail(w, 409, "order is not cancellable in its current state")
+		return
+	}
 	result, e := s.Hero.SetStatus(r.Context(), o.UpstreamID, "8")
 	if e != nil {
 		fail(w, 409, e)
@@ -279,11 +304,89 @@ func (s *Server) cancel(w http.ResponseWriter, r *http.Request, u store.User) {
 		fail(w, 409, "上游未确认取消")
 		return
 	}
+	_ = s.Store.EndCurrentAttempt(o.ID, o.UpstreamID, "cancelled")
 	if e = s.Store.RefundSMS(o.ID, "cancelled"); e != nil {
 		fail(w, 500, e)
 		return
 	}
 	jsonOut(w, 200, map[string]bool{"refunded": true})
+}
+
+func (s *Server) RunAutoReplace(ctx context.Context) {
+	if s.C.AutoReplaceMax == 0 {
+		return
+	}
+	ticker := time.NewTicker(s.C.AutoReplaceScan)
+	defer ticker.Stop()
+	s.runAutoReplaceBatch(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.runAutoReplaceBatch(ctx)
+		}
+	}
+}
+
+func (s *Server) runAutoReplaceBatch(ctx context.Context) {
+	before := time.Now().UTC().Add(-s.C.AutoReplaceAfter).Format(time.RFC3339)
+	orders, err := s.Store.ListDueAutoReplace(before, s.C.AutoReplaceMax, 20)
+	if err != nil {
+		log.Printf("auto replace scan failed: %v", err)
+		return
+	}
+	for _, o := range orders {
+		claimed, err := s.Store.ClaimAutoReplace(o.ID, o.UpstreamID)
+		if err != nil || !claimed {
+			continue
+		}
+		s.replaceNumber(ctx, o)
+	}
+}
+
+func (s *Server) replaceNumber(ctx context.Context, o store.SMSOrder) {
+	st, err := s.Hero.Status(ctx, o.UpstreamID)
+	if err != nil {
+		_ = s.Store.ReleaseAutoReplace(o.ID, false)
+		return
+	}
+	status, code := parseHeroStatus(st)
+	if code != "" || status != "waiting" {
+		_ = s.Store.UpdateSMS(o.ID, status, code)
+		return
+	}
+	result, err := s.Hero.SetStatus(ctx, o.UpstreamID, "8")
+	if err != nil {
+		switch hero.ErrorCode(err) {
+		case "OTP_RECEIVED", "NEW_OTP_RECEIVED":
+			if latest, e := s.Hero.Status(ctx, o.UpstreamID); e == nil {
+				status, code = parseHeroStatus(latest)
+				_ = s.Store.UpdateSMS(o.ID, status, code)
+				return
+			}
+		case "FREE_CANCELLATION_EXPIRED":
+			_ = s.Store.ReleaseAutoReplace(o.ID, true)
+			return
+		}
+		_ = s.Store.ReleaseAutoReplace(o.ID, false)
+		return
+	}
+	if !strings.Contains(result, "CANCEL") && !strings.Contains(result, "ACCESS") {
+		_ = s.Store.ReleaseAutoReplace(o.ID, false)
+		return
+	}
+	_ = s.Store.EndCurrentAttempt(o.ID, o.UpstreamID, "cancelled")
+	act, err := s.Hero.Acquire(ctx, o.Country, o.Service, o.UpstreamCost)
+	if err != nil {
+		if e := s.Store.RefundSMS(o.ID, "replace_failed"); e != nil {
+			log.Printf("auto replace refund failed for %s: %v", o.ID, e)
+		}
+		return
+	}
+	if err = s.Store.ReplaceActivation(o.ID, o.UpstreamID, act.ID, act.Phone, act.Cost); err != nil {
+		log.Printf("auto replace persistence failed for %s: %v", o.ID, err)
+	}
 }
 
 func (s *Server) recharge(w http.ResponseWriter, r *http.Request, u store.User) {

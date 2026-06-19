@@ -73,3 +73,20 @@ func TestRechargeCreditIsIdempotentAndTransactionUnique(t *testing.T) {
 		t.Fatalf("balance=%d, want 1000", balance)
 	}
 }
+
+func TestDeleteSessionInvalidatesToken(t *testing.T) {
+	s := testStore(t)
+	_, token, err := s.Register("session@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.UserByToken(token); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DeleteSession(token); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.UserByToken(token); err == nil {
+		t.Fatal("deleted session still accepted")
+	}
+}

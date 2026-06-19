@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>云码台</title>
   <link rel="stylesheet" href="/app.css">
+  <style>.auto-replace{display:flex;align-items:center;gap:8px;font-size:13px;color:#475569;margin:12px 0}.auto-replace input{width:auto}</style>
 </head>
 <body>
   <div class="glow one"></div><div class="glow two"></div>
@@ -18,7 +19,7 @@
     <section id="app" class="hidden">
       <div class="topline"><div><p class="eyebrow">DASHBOARD</p><h1>选择你的号码</h1></div><div class="balance card"><span>账户余额</span><strong id="balance">¥0.00</strong><button id="rechargeBtn" class="small">充值</button></div></div>
       <div class="workspace">
-        <section class="card picker"><div class="step"><i>01</i><div><label>国家 / 地区</label><select id="country"><option>正在载入...</option></select></div></div><div class="step"><i>02</i><div><label>服务</label><input id="search" placeholder="搜索 Telegram、Google..."><select id="service" size="8"></select></div></div><div class="quote"><div><span>当前售价</span><strong id="price">请选择服务</strong><small id="stock"></small></div><button id="buy" class="primary" disabled>获取号码</button></div></section>
+        <section class="card picker"><div class="step"><i>01</i><div><label>国家 / 地区</label><select id="country"><option>正在载入...</option></select></div></div><div class="step"><i>02</i><div><label>服务</label><input id="search" placeholder="搜索 Telegram、Google..."><select id="service" size="8"></select></div></div><label class="auto-replace"><input id="autoReplace" type="checkbox" checked> 未收到验证码时自动取消并换号（最多 <span id="autoReplaceMax">2</span> 次）</label><div class="quote"><div><span>当前售价</span><strong id="price">请选择服务</strong><small id="stock"></small></div><button id="buy" class="primary" disabled>获取号码</button></div></section>
         <section class="card orders"><div class="section-title"><div><p class="eyebrow">ACTIVATIONS</p><h2>我的订单</h2></div><button id="refresh" class="link">刷新</button></div><div id="orders"><div class="empty">还没有订单。选一个服务开始吧。</div></div></section>
       </div>
     </section>
