@@ -35,3 +35,13 @@ APP_BASE_URL=https://你的公网HTTPS域名
 go test ./...
 go vet ./...
 ```
+
+## Docker
+
+```powershell
+Copy-Item .env.example .env
+# 编辑 .env 后启动
+docker compose up -d --build
+```
+
+健康检查地址：`GET /healthz`。

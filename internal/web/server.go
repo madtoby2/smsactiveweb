@@ -37,6 +37,7 @@ func New(c config.Config, s *store.Store) *Server {
 func (s *Server) Routes() http.Handler {
 	m := http.NewServeMux()
 	sub, _ := fs.Sub(assets, "public")
+	m.HandleFunc("GET /healthz", s.health)
 	m.Handle("/", http.FileServer(http.FS(sub)))
 	m.HandleFunc("POST /api/auth/register", s.register)
 	m.HandleFunc("POST /api/auth/login", s.login)
@@ -53,6 +54,13 @@ func (s *Server) Routes() http.Handler {
 	m.HandleFunc("POST /sandbox/pay/{id}", s.sandboxComplete)
 	m.HandleFunc("POST /api/payments/yishoumi/notify", s.ysmNotify)
 	return security(m)
+}
+func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	if err := s.Store.DB.PingContext(r.Context()); err != nil {
+		jsonOut(w, http.StatusServiceUnavailable, map[string]string{"status": "unhealthy"})
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 func security(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
