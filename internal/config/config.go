@@ -14,7 +14,7 @@ type Config struct {
 	Port, BaseURL, HeroKey, HeroURL, HeroCurrency string
 	USDCNY, Markup                                float64
 	PayProvider, YSMAppID, YSMSecret, YSMURL      string
-	EPayPID, EPayKey, EPayURL                    string
+	EPayPID, EPayKey, EPayURL                     string
 	AllowLiveSMSInSandbox                         bool
 	AutoReplaceAfter, AutoReplaceScan             time.Duration
 	AutoReplaceMax                                int

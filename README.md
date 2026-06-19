@@ -6,7 +6,7 @@
 
 登录使用邮箱作为账户标识，浏览器 Cookie 只保存随机会话令牌，不保存邮箱或密码。会话有效期为 30 天，活跃期间自动续期；退出登录会同步删除服务端会话。
 
-每次购买先锁定 HeroSMS 报价并加 `¥1.00`，再为该接码订单调用支付 API；只有服务器验签确认付款成功，系统才会向 HeroSMS 取号。支付支持易收米 API，本地默认使用沙箱支付。易收米启用前应先取得其对实际业务类目的书面准入确认。
+每次购买先锁定 HeroSMS 报价并加 `¥1.00`，再为该接码订单调用支付 API；只有服务器验签确认付款成功，系统才会向 HeroSMS 取号。支付支持 50Pay（彩虹易支付兼容协议）和易收米 API，本地默认使用沙箱支付。
 
 ## 运行
 
@@ -34,6 +34,20 @@ APP_BASE_URL=https://你的公网HTTPS域名
 ```
 
 易收米异步通知地址为：`https://你的域名/api/payments/yishoumi/notify`。接码订单只在通知签名、APPID、订单状态、订单号和金额全部校验通过后取号；同一支付回调重复到达也只能获取一个号码。
+
+## 启用 50Pay
+
+50Pay SDK 使用彩虹易支付兼容协议。先配置公网 HTTPS 域名，再在 `.env` 设置：
+
+```dotenv
+PAY_PROVIDER=epay
+EPAY_BASE_URL=https://50pay.xiajuan88.com
+EPAY_PID=商户ID
+EPAY_KEY=商户密钥
+APP_BASE_URL=https://你的公网HTTPS域名
+```
+
+异步通知地址为 `https://你的域名/api/payments/epay/notify`，同步返回地址为 `https://你的域名/api/payments/epay/return`。平台会校验 MD5 签名、商户号、`TRADE_SUCCESS` 状态、订单号、精确金额和第三方交易号；通知重复到达只会取一次号码。商户密钥只应保存在服务器 `.env`，不能提交到 Git。
 
 ## 检查
 
