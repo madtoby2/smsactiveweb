@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>云码台</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div class="glow one"></div><div class="glow two"></div>
+  <header><a class="brand" href="/"><span>Y</span> 云码台</a><nav><button id="logout" class="link hidden">退出</button></nav></header>
+  <main>
+    <section id="auth" class="auth-grid">
+      <div class="hero"><p class="eyebrow">GLOBAL SMS ACCESS</p><h1>验证码接收，<br><em>清晰且迅速。</em></h1><p>实时同步 HeroSMS 国家、服务与库存。价格透明，上游成本换算后固定加 ¥1。</p><div class="trust"><b>实时库存</b><b>自动退款</b><b>安全余额</b></div></div>
+      <form id="authForm" class="card auth-card"><h2 id="authTitle">登录账户</h2><p>进入你的接码控制台</p><label>邮箱<input id="email" type="email" required placeholder="name@example.com"></label><label>密码<input id="password" type="password" minlength="8" required placeholder="至少 8 位"></label><button class="primary" type="submit">继续</button><button id="toggleAuth" class="link" type="button">没有账户？立即注册</button><div id="authError" class="error"></div></form>
+    </section>
+
+    <section id="app" class="hidden">
+      <div class="topline"><div><p class="eyebrow">DASHBOARD</p><h1>选择你的号码</h1></div><div class="balance card"><span>账户余额</span><strong id="balance">¥0.00</strong><button id="rechargeBtn" class="small">充值</button></div></div>
+      <div class="workspace">
+        <section class="card picker"><div class="step"><i>01</i><div><label>国家 / 地区</label><select id="country"><option>正在载入...</option></select></div></div><div class="step"><i>02</i><div><label>服务</label><input id="search" placeholder="搜索 Telegram、Google..."><select id="service" size="8"></select></div></div><div class="quote"><div><span>当前售价</span><strong id="price">请选择服务</strong><small id="stock"></small></div><button id="buy" class="primary" disabled>获取号码</button></div></section>
+        <section class="card orders"><div class="section-title"><div><p class="eyebrow">ACTIVATIONS</p><h2>我的订单</h2></div><button id="refresh" class="link">刷新</button></div><div id="orders"><div class="empty">还没有订单。选一个服务开始吧。</div></div></section>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="recharge"><form method="dialog" class="modal"><button class="close">×</button><p class="eyebrow">ADD BALANCE</p><h2>充值余额</h2><label>金额（元）<input id="amount" type="number" min="1" max="10000" step="0.01" value="10"></label><label>支付方式<select id="payType"><option value="2">微信扫码</option><option value="3">微信 H5</option><option value="11">支付宝 H5</option></select></label><button id="pay" type="button" class="primary">前往付款</button><p class="hint">到账以服务器验签通知为准，页面跳转不代表支付成功。</p></form></dialog>
+  <div id="toast"></div><script src="/app.js"></script>
+</body></html>

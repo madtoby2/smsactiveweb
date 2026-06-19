@@ -1,0 +1,6 @@
+.env
+data/
+*.log
+app.exe
+.test-*
+server.pid

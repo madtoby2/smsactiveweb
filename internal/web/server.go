@@ -1,0 +1,382 @@
+package web
+
+import (
+	"embed"
+	"encoding/json"
+	"fmt"
+	"io"
+	"io/fs"
+	"log"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"sms-platform/internal/config"
+	"sms-platform/internal/hero"
+	"sms-platform/internal/pricing"
+	"sms-platform/internal/store"
+	"sms-platform/internal/yishoumi"
+)
+
+//go:embed public/*
+var assets embed.FS
+
+type Server struct {
+	C     config.Config
+	Store *store.Store
+	Hero  *hero.Client
+	YSM   *yishoumi.Client
+}
+type handler func(http.ResponseWriter, *http.Request, store.User)
+
+func New(c config.Config, s *store.Store) *Server {
+	return &Server{c, s, hero.New(c.HeroKey, c.HeroURL, c.HeroCurrency), yishoumi.New(c.YSMAppID, c.YSMSecret, c.YSMURL)}
+}
+func (s *Server) Routes() http.Handler {
+	m := http.NewServeMux()
+	sub, _ := fs.Sub(assets, "public")
+	m.Handle("/", http.FileServer(http.FS(sub)))
+	m.HandleFunc("POST /api/auth/register", s.register)
+	m.HandleFunc("POST /api/auth/login", s.login)
+	m.HandleFunc("POST /api/auth/logout", s.logout)
+	m.HandleFunc("GET /api/me", s.auth(s.me))
+	m.HandleFunc("GET /api/catalog", s.auth(s.catalog))
+	m.HandleFunc("GET /api/orders", s.auth(s.orders))
+	m.HandleFunc("POST /api/orders", s.auth(s.purchase))
+	m.HandleFunc("GET /api/orders/{id}", s.auth(s.orderStatus))
+	m.HandleFunc("POST /api/orders/{id}/cancel", s.auth(s.cancel))
+	m.HandleFunc("POST /api/recharges", s.auth(s.recharge))
+	m.HandleFunc("GET /api/recharges/{id}", s.auth(s.rechargeStatus))
+	m.HandleFunc("GET /sandbox/pay/{id}", s.sandboxPay)
+	m.HandleFunc("POST /sandbox/pay/{id}", s.sandboxComplete)
+	m.HandleFunc("POST /api/payments/yishoumi/notify", s.ysmNotify)
+	return security(m)
+}
+func security(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "same-origin")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'self'")
+		next.ServeHTTP(w, r)
+	})
+}
+func jsonOut(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("content-type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+func fail(w http.ResponseWriter, status int, e any) {
+	jsonOut(w, status, map[string]any{"error": fmt.Sprint(e)})
+}
+func decode(r *http.Request, v any) error {
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(v)
+}
+
+func (s *Server) auth(next handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		c, e := r.Cookie("session")
+		if e != nil {
+			fail(w, 401, "请先登录")
+			return
+		}
+		u, e := s.Store.UserByToken(c.Value)
+		if e != nil {
+			fail(w, 401, "登录已过期")
+			return
+		}
+		next(w, r, u)
+	}
+}
+func setSession(w http.ResponseWriter, token string, secure bool) {
+	http.SetCookie(w, &http.Cookie{Name: "session", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: secure, MaxAge: 7 * 86400})
+}
+func (s *Server) register(w http.ResponseWriter, r *http.Request) {
+	var in struct{ Email, Password string }
+	if decode(r, &in) != nil {
+		fail(w, 400, "请求格式错误")
+		return
+	}
+	in.Email = strings.ToLower(strings.TrimSpace(in.Email))
+	if !strings.Contains(in.Email, "@") {
+		fail(w, 400, "邮箱格式错误")
+		return
+	}
+	u, t, e := s.Store.Register(in.Email, in.Password)
+	if e != nil {
+		fail(w, 400, e)
+		return
+	}
+	setSession(w, t, strings.HasPrefix(s.C.BaseURL, "https://"))
+	jsonOut(w, 201, u)
+}
+func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	var in struct{ Email, Password string }
+	if decode(r, &in) != nil {
+		fail(w, 400, "请求格式错误")
+		return
+	}
+	u, t, e := s.Store.Login(strings.ToLower(strings.TrimSpace(in.Email)), in.Password)
+	if e != nil {
+		fail(w, 401, e)
+		return
+	}
+	setSession(w, t, strings.HasPrefix(s.C.BaseURL, "https://"))
+	jsonOut(w, 200, u)
+}
+func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{Name: "session", Path: "/", MaxAge: -1, HttpOnly: true})
+	jsonOut(w, 200, map[string]bool{"ok": true})
+}
+func (s *Server) me(w http.ResponseWriter, r *http.Request, u store.User) {
+	liveSMSPurchaseEnabled := s.C.PayProvider != "sandbox" || s.C.AllowLiveSMSInSandbox
+	jsonOut(w, 200, map[string]any{"user": u, "pricing": map[string]any{"markupCNY": s.C.Markup, "usdCnyRate": s.C.USDCNY}, "paymentProvider": s.C.PayProvider, "liveSmsPurchaseEnabled": liveSMSPurchaseEnabled})
+}
+
+func (s *Server) catalog(w http.ResponseWriter, r *http.Request, u store.User) {
+	country := r.URL.Query().Get("country")
+	countries, e := s.Hero.Countries(r.Context())
+	if e != nil {
+		fail(w, 502, e)
+		return
+	}
+	if country == "" {
+		jsonOut(w, 200, map[string]any{"countries": countries})
+		return
+	}
+	services, e := s.Hero.Services(r.Context(), country)
+	if e != nil {
+		fail(w, 502, e)
+		return
+	}
+	offers, e := s.Hero.Offers(r.Context(), country)
+	if e != nil {
+		fail(w, 502, e)
+		return
+	}
+	type priced struct {
+		hero.Offer
+		PriceFen int64 `json:"priceFen"`
+	}
+	po := make([]priced, 0, len(offers))
+	for _, o := range offers {
+		po = append(po, priced{o, pricing.SaleFen(o.Cost, s.C.USDCNY, s.C.Markup)})
+	}
+	jsonOut(w, 200, map[string]any{"countries": countries, "services": services, "offers": po})
+}
+func (s *Server) orders(w http.ResponseWriter, r *http.Request, u store.User) {
+	x, e := s.Store.ListSMS(u.ID)
+	if e != nil {
+		fail(w, 500, e)
+		return
+	}
+	jsonOut(w, 200, x)
+}
+func (s *Server) purchase(w http.ResponseWriter, r *http.Request, u store.User) {
+	if s.C.PayProvider == "sandbox" && !s.C.AllowLiveSMSInSandbox {
+		fail(w, http.StatusServiceUnavailable, "sandbox payments cannot purchase live HeroSMS numbers")
+		return
+	}
+	var in struct{ Country, Service string }
+	if decode(r, &in) != nil || in.Country == "" || in.Service == "" {
+		fail(w, 400, "请选择国家和服务")
+		return
+	}
+	offers, e := s.Hero.Offers(r.Context(), in.Country)
+	if e != nil {
+		fail(w, 502, e)
+		return
+	}
+	var offer *hero.Offer
+	for i := range offers {
+		if offers[i].Service == in.Service && offers[i].Count > 0 {
+			offer = &offers[i]
+			break
+		}
+	}
+	if offer == nil {
+		fail(w, 409, "该服务暂时无库存")
+		return
+	}
+	o := store.SMSOrder{ID: store.ID("S"), UserID: u.ID, Country: in.Country, Service: in.Service, UpstreamCost: offer.Cost, PriceFen: pricing.SaleFen(offer.Cost, s.C.USDCNY, s.C.Markup), CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	if e = s.Store.CreateSMS(u, o); e != nil {
+		fail(w, 409, e)
+		return
+	}
+	act, e := s.Hero.Acquire(r.Context(), in.Country, in.Service, offer.Cost)
+	if e != nil {
+		_ = s.Store.RefundSMS(o.ID, "purchase_failed")
+		fail(w, 502, e)
+		return
+	}
+	if e = s.Store.ActivateSMS(o.ID, act.ID, act.Phone, act.Cost); e != nil {
+		log.Printf("activate persistence failed: %v", e)
+		fail(w, 500, "订单保存失败，请联系客服")
+		return
+	}
+	o, e = s.Store.GetSMS(o.ID, u.ID)
+	jsonOut(w, 201, o)
+}
+func (s *Server) orderStatus(w http.ResponseWriter, r *http.Request, u store.User) {
+	o, e := s.Store.GetSMS(r.PathValue("id"), u.ID)
+	if e != nil {
+		fail(w, 404, "订单不存在")
+		return
+	}
+	if o.UpstreamID != "" && o.Status != "cancelled" && o.Status != "finished" {
+		st, e := s.Hero.Status(r.Context(), o.UpstreamID)
+		if e == nil {
+			status, code := parseHeroStatus(st)
+			_ = s.Store.UpdateSMS(o.ID, status, code)
+			o, _ = s.Store.GetSMS(o.ID, u.ID)
+		}
+	}
+	jsonOut(w, 200, o)
+}
+func parseHeroStatus(st string) (string, string) {
+	p := strings.SplitN(st, ":", 2)
+	switch p[0] {
+	case "STATUS_OK":
+		if len(p) == 2 {
+			return "code_received", p[1]
+		}
+		return "code_received", ""
+	case "STATUS_WAIT_CODE", "STATUS_WAIT_RETRY":
+		return "waiting", ""
+	case "STATUS_CANCEL":
+		return "cancelled", ""
+	}
+	return strings.ToLower(strings.TrimPrefix(p[0], "STATUS_")), ""
+}
+func (s *Server) cancel(w http.ResponseWriter, r *http.Request, u store.User) {
+	o, e := s.Store.GetSMS(r.PathValue("id"), u.ID)
+	if e != nil {
+		fail(w, 404, "订单不存在")
+		return
+	}
+	if o.Code != "" {
+		fail(w, 409, "已收到验证码，不能取消")
+		return
+	}
+	result, e := s.Hero.SetStatus(r.Context(), o.UpstreamID, "8")
+	if e != nil {
+		fail(w, 409, e)
+		return
+	}
+	if !strings.Contains(result, "CANCEL") && !strings.Contains(result, "ACCESS") {
+		fail(w, 409, "上游未确认取消")
+		return
+	}
+	if e = s.Store.RefundSMS(o.ID, "cancelled"); e != nil {
+		fail(w, 500, e)
+		return
+	}
+	jsonOut(w, 200, map[string]bool{"refunded": true})
+}
+
+func (s *Server) recharge(w http.ResponseWriter, r *http.Request, u store.User) {
+	var in struct {
+		AmountFen int64 `json:"amountFen"`
+		PayType   int   `json:"payType"`
+	}
+	if decode(r, &in) != nil || in.AmountFen < 100 || in.AmountFen > 1000000 {
+		fail(w, 400, "充值金额应为 1 至 10000 元")
+		return
+	}
+	if in.PayType == 0 {
+		in.PayType = 2
+	}
+	if in.PayType != 1 && in.PayType != 2 && in.PayType != 3 && in.PayType != 11 {
+		fail(w, 400, "unsupported payment method")
+		return
+	}
+	if s.C.PayProvider != "sandbox" && (s.C.PayProvider != "yishoumi" || s.C.YSMAppID == "" || s.C.YSMSecret == "") {
+		fail(w, 503, "payment provider is not configured")
+		return
+	}
+	raw, _ := store.Token()
+	rr := store.Recharge{ID: store.ID("R"), UserID: u.ID, AmountFen: in.AmountFen, Provider: s.C.PayProvider, PayType: strconv.Itoa(in.PayType), Token: raw, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	if e := s.Store.CreateRecharge(rr); e != nil {
+		fail(w, 500, e)
+		return
+	}
+	if s.C.PayProvider == "sandbox" {
+		jsonOut(w, 201, map[string]any{"id": rr.ID, "checkoutUrl": fmt.Sprintf("/sandbox/pay/%s?token=%s", rr.ID, url.QueryEscape(raw))})
+		return
+	}
+	if s.C.PayProvider != "yishoumi" || s.C.YSMAppID == "" || s.C.YSMSecret == "" {
+		fail(w, 503, "支付通道未配置")
+		return
+	}
+	out, e := s.YSM.Create(r.Context(), rr.ID, in.AmountFen, in.PayType, s.C.BaseURL+"/api/payments/yishoumi/notify", s.C.BaseURL+"/?recharge="+rr.ID)
+	if e != nil {
+		_ = s.Store.SetRechargeStatus(rr.ID, "failed")
+		fail(w, 502, e)
+		return
+	}
+	jsonOut(w, 201, map[string]any{"id": rr.ID, "checkoutUrl": out.URL})
+}
+func (s *Server) rechargeStatus(w http.ResponseWriter, r *http.Request, u store.User) {
+	x, e := s.Store.GetRecharge(r.PathValue("id"))
+	if e != nil || x.UserID != u.ID {
+		fail(w, 404, "充值订单不存在")
+		return
+	}
+	jsonOut(w, 200, x)
+}
+func (s *Server) sandboxPay(w http.ResponseWriter, r *http.Request) {
+	x, e := s.Store.GetRecharge(r.PathValue("id"))
+	if e != nil || x.Provider != "sandbox" || x.Token != r.URL.Query().Get("token") {
+		http.Error(w, "invalid order", 404)
+		return
+	}
+	w.Header().Set("content-type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<!doctype html><meta charset=utf-8><title>沙箱付款</title><style>body{font:16px system-ui;display:grid;place-items:center;height:100vh;background:#f4f7fb}.box{background:white;padding:36px;border-radius:18px;box-shadow:0 20px 60px #2342}button{padding:12px 24px;background:#2563eb;color:white;border:0;border-radius:9px}</style><form class=box method=post><h2>沙箱付款</h2><p>订单 %s</p><p>应付 ¥%.2f</p><input type=hidden name=token value="%s"><button>确认付款</button></form>`, x.ID, float64(x.AmountFen)/100, x.Token)
+}
+func (s *Server) sandboxComplete(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	x, e := s.Store.GetRecharge(r.PathValue("id"))
+	if e != nil || x.Provider != "sandbox" || x.Token != r.Form.Get("token") {
+		http.Error(w, "invalid order", 400)
+		return
+	}
+	if e = s.Store.CreditRecharge(x.ID, ""); e != nil {
+		http.Error(w, e.Error(), 409)
+		return
+	}
+	http.Redirect(w, r, "/?recharge="+x.ID, http.StatusSeeOther)
+}
+func (s *Server) ysmNotify(w http.ResponseWriter, r *http.Request) {
+	if e := r.ParseForm(); e != nil || !yishoumi.Verify(r.PostForm, s.C.YSMSecret) {
+		http.Error(w, "bad sign", 400)
+		return
+	}
+	if r.PostForm.Get("appid") != s.C.YSMAppID || r.PostForm.Get("state") != "SUCCESS" {
+		http.Error(w, "bad state", 400)
+		return
+	}
+	x, e := s.Store.GetRecharge(r.PostForm.Get("mch_orderid"))
+	if e != nil || x.Provider != "yishoumi" {
+		http.Error(w, "unknown order", 404)
+		return
+	}
+	amount, e := strconv.ParseInt(r.PostForm.Get("total_fee"), 10, 64)
+	if e != nil || amount != x.AmountFen {
+		http.Error(w, "amount mismatch", 400)
+		return
+	}
+	providerID := r.PostForm.Get("ysm_orderid")
+	if providerID == "" {
+		http.Error(w, "missing provider order", 400)
+		return
+	}
+	if e = s.Store.CreditRecharge(x.ID, providerID); e != nil {
+		http.Error(w, e.Error(), 409)
+		return
+	}
+	w.Write([]byte("success"))
+}
