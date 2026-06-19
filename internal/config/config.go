@@ -2,6 +2,8 @@ package config
 
 import (
 	"bufio"
+	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -15,6 +17,33 @@ type Config struct {
 	AllowLiveSMSInSandbox                         bool
 	AutoReplaceAfter, AutoReplaceScan             time.Duration
 	AutoReplaceMax                                int
+}
+
+func (c Config) Validate() error {
+	if c.HeroKey == "" {
+		return fmt.Errorf("HEROSMS_API_KEY is required")
+	}
+	if c.USDCNY <= 0 {
+		return fmt.Errorf("USD_CNY_RATE must be greater than zero")
+	}
+	if c.Markup < 0 {
+		return fmt.Errorf("PRICE_MARKUP_CNY cannot be negative")
+	}
+	switch c.PayProvider {
+	case "sandbox":
+		return nil
+	case "yishoumi":
+		if c.YSMAppID == "" || c.YSMSecret == "" {
+			return fmt.Errorf("YSM_APP_ID and YSM_SECRET are required for yishoumi")
+		}
+		u, err := url.Parse(c.BaseURL)
+		if err != nil || u.Scheme != "https" || u.Host == "" {
+			return fmt.Errorf("APP_BASE_URL must be a public HTTPS URL for yishoumi callbacks")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported PAY_PROVIDER %q", c.PayProvider)
+	}
 }
 
 func Load() Config {

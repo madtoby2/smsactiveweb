@@ -11,8 +11,8 @@ import (
 
 func main() {
 	c := config.Load()
-	if c.HeroKey == "" {
-		log.Fatal("HEROSMS_API_KEY is required")
+	if err := c.Validate(); err != nil {
+		log.Fatal(err)
 	}
 	s, e := store.Open("data/platform.db")
 	if e != nil {
