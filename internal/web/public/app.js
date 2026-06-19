@@ -24,12 +24,41 @@ function serviceIcon(code, name = '') {
   if (code === 'tg' || key.includes('telegram')) return '<span class="service-icon telegram" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20.7 4.2 3.8 10.7c-1.2.5-1.2 1.1-.2 1.4l4.3 1.4 1.7 5.1c.2.7.1 1 .8 1 .5 0 .8-.2 1-.4l2.1-2 4.4 3.2c.8.5 1.4.2 1.6-.8l2.9-13.8c.3-1.3-.5-1.9-1.7-1.6ZM9 13.2l9.7-6.1c.5-.3.9-.1.5.2l-8 7.2-.3 3.2L9 13.2Z"/></svg></span>';
   if (code === 'wa' || key.includes('whatsapp')) return '<span class="service-icon whatsapp" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3a8.5 8.5 0 0 0-7.4 12.7L3.5 20.5l4.8-1.1A8.5 8.5 0 1 0 12 3Zm4.9 12.3c-.2.6-1.2 1.1-1.8 1.2-.5.1-1.2.2-3.8-.9-3.2-1.4-5.2-4.6-5.4-4.8-.2-.2-1.3-1.7-1.3-3.2s.8-2.3 1.1-2.6c.3-.3.7-.4 1-.4h.7c.2 0 .5-.1.8.6l1 2.4c.1.2.1.5 0 .7l-.4.7c-.2.2-.4.5-.2.8.2.3.8 1.3 1.8 2.1 1.2 1.1 2.3 1.5 2.6 1.7.3.2.5.1.7-.1l1.1-1.3c.2-.3.5-.3.8-.2l2.2 1c.3.2.6.2.7.4.1.1.1.8-.1 1.4Z"/></svg></span>';
   if (code === 'ig' || key.includes('instagram')) return '<span class="service-icon instagram" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.5" cy="6.8" r="1"/></svg></span>';
-  if (code === 'go' || key.includes('google') || key.includes('gmail')) return '<span class="service-icon google" aria-hidden="true">G</span>';
   if (key.includes('gmx')) return '<span class="service-icon gmx" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3.904 11.571v1.501H5.46c-.075.845-.712 1.274-1.539 1.274-1.255 0-1.934-1.157-1.934-2.3 0-1.118.65-2.317 1.906-2.317.77 0 1.321.468 1.586 1.166l1.812-.76C6.66 8.765 5.489 8.086 3.979 8.086 1.614 8.087 0 9.654 0 12.037c0 2.309 1.604 3.876 3.913 3.876 1.227 0 2.308-.439 3.025-1.44.651-.916.731-1.831.75-2.904zM13.65 8.3l-1.586 3.95-1.5-3.95H8.67l-1.255 7.392h1.91l.619-4.257h.019l1.695 4.257h.765l1.775-4.257h.024l.538 4.257h1.92L15.562 8.3zm7.708 3.473 2.086-3.475h-2.128l-1.11 1.767L19.012 8.3H16.68l2.459 3.47-2.46 3.922h2.333l1.33-2.223 1.576 2.223H24l-2.642-3.92"/></svg></span>';
-  if (code === 'fb' || key.includes('facebook')) return '<span class="service-icon facebook" aria-hidden="true">f</span>';
-  if (code === 'tw' || key.includes('twitter') || key === 'x') return '<span class="service-icon x-icon" aria-hidden="true">𝕏</span>';
-  if (code === 'ds' || key.includes('discord')) return '<span class="service-icon discord" aria-hidden="true">D</span>';
-  return `<span class="service-icon fallback" aria-hidden="true">${escapeHTML((name || code || '?').trim().charAt(0).toUpperCase())}</span>`;
+  const brand = serviceBrand(key);
+  const icon = brand && globalThis.SERVICE_ICONS?.[brand];
+  if (icon) {
+    return `<span class="service-icon brand" aria-hidden="true"><svg viewBox="0 0 ${icon.width} ${icon.height}">${icon.body}</svg></span>`;
+  }
+  return generatedServiceIcon(code, name);
+}
+
+const serviceBrands = [
+  ['gmail', 'google-gmail'], ['google', 'google'], ['facebook', 'facebook'], ['discord', 'discord-icon'],
+  ['tiktok', 'tiktok-icon'], ['linkedin', 'linkedin-icon'], ['pinterest', 'pinterest'],
+  ['reddit', 'reddit-icon'], ['twitch', 'twitch'], ['steam', 'steam'], ['github', 'github-icon'],
+  ['gitlab', 'gitlab-icon'], ['microsoft', 'microsoft-icon'], ['apple', 'apple'], ['yahoo', 'yahoo'],
+  ['paypal', 'paypal'], ['netflix', 'netflix-icon'], ['spotify', 'spotify-icon'], ['airbnb', 'airbnb-icon'],
+  ['dropbox', 'dropbox'], ['cloudflare', 'cloudflare-icon'], ['openai', 'openai-icon'], ['chatgpt', 'openai-icon'],
+  ['signal', 'signal'], ['slack', 'slack-icon'], ['notion', 'notion-icon'], ['zoom', 'zoom-icon']
+];
+
+function serviceBrand(key) {
+  const code = key.split(' ', 1)[0];
+  const codeBrand = {go: 'google', fb: 'facebook', ds: 'discord-icon'}[code];
+  if (codeBrand) return codeBrand;
+  const match = serviceBrands.find(([needle]) => key.includes(needle));
+  return match ? match[1] : null;
+}
+
+function generatedServiceIcon(code, name = '') {
+  const label = (name || code || '?').trim();
+  const letters = (label.match(/[a-z0-9]/gi) || ['?']).slice(0, 2).join('').toUpperCase();
+  let hash = 0;
+  for (const char of `${code}:${name}`) hash = ((hash * 31) + char.charCodeAt(0)) >>> 0;
+  const hue = hash % 360;
+  const hue2 = (hue + 42 + (hash % 50)) % 360;
+  return `<span class="service-icon generated" aria-hidden="true"><svg viewBox="0 0 34 34"><defs><linearGradient id="service-${hash}" x1="0" y1="0" x2="1" y2="1"><stop stop-color="hsl(${hue} 68% 52%)"/><stop offset="1" stop-color="hsl(${hue2} 72% 42%)"/></linearGradient></defs><rect width="34" height="34" rx="10" fill="url(#service-${hash})"/><circle cx="27" cy="7" r="4" fill="white" opacity=".18"/><text x="17" y="21.5" text-anchor="middle">${escapeHTML(letters)}</text></svg></span>`;
 }
 
 async function boot() {

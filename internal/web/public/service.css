@@ -63,6 +63,23 @@
   height: 22px;
   fill: currentColor;
 }
+.service-icon.brand {
+  background: #fff;
+  box-shadow: inset 0 0 0 1px #e3e8f0;
+}
+.service-icon.generated {
+  overflow: hidden;
+  background: transparent;
+}
+.service-icon.generated svg {
+  width: 34px;
+  height: 34px;
+}
+.service-icon.generated text {
+  fill: #fff;
+  font: 800 10px/1 Arial, sans-serif;
+  letter-spacing: -.3px;
+}
 .service-icon.instagram svg rect,
 .service-icon.instagram svg circle {
   fill: none;
