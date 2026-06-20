@@ -512,6 +512,38 @@ func cloneValues(values url.Values) url.Values {
 	return clone
 }
 
+func TestPublicSEOAndFooterAssets(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "seo.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	h := New(config.Config{}, db).Routes()
+	tests := []struct {
+		path  string
+		wants []string
+	}{
+		{"/", []string{`rel="canonical" href="https://35-212-227-118.sslip.io/"`, `href="/contact.html"`, `href="/api.html"`, `application/ld+json`}},
+		{"/contact.html", []string{"联系我们", `rel="canonical"`}},
+		{"/api.html", []string{"API 接入", "合作 API"}},
+		{"/robots.txt", []string{"User-agent: *", "Sitemap: https://35-212-227-118.sslip.io/sitemap.xml"}},
+		{"/sitemap.xml", []string{"<urlset", "https://35-212-227-118.sslip.io/contact.html", "https://35-212-227-118.sslip.io/api.html"}},
+	}
+	for _, test := range tests {
+		req := httptest.NewRequest(http.MethodGet, test.path, nil)
+		result := httptest.NewRecorder()
+		h.ServeHTTP(result, req)
+		if result.Code != http.StatusOK {
+			t.Fatalf("GET %s status=%d", test.path, result.Code)
+		}
+		for _, want := range test.wants {
+			if !strings.Contains(result.Body.String(), want) {
+				t.Fatalf("GET %s missing %q", test.path, want)
+			}
+		}
+	}
+}
+
 func TestUnlimitedAutoReplaceCancelsBeforeEveryAcquireAndStopsOnCode(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "unlimited-replace.db"))
 	if err != nil {
