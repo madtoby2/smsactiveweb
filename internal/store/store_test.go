@@ -177,3 +177,43 @@ func TestDeleteSessionInvalidatesToken(t *testing.T) {
 		t.Fatal("deleted session still accepted")
 	}
 }
+
+func TestDeleteExpiredUnpaidSMSOnlyRemovesPendingPairs(t *testing.T) {
+	s := testStore(t)
+	u, _, err := s.Register("expiry@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-21 * time.Minute).UTC().Format(time.RFC3339)
+	fresh := time.Now().Add(-19 * time.Minute).UTC().Format(time.RFC3339)
+	create := func(orderID, paymentID, created string) {
+		t.Helper()
+		o := SMSOrder{ID: orderID, UserID: u.ID, UpstreamProvider: "hero", Country: "2", Service: "tg", UpstreamCost: 1, PriceFen: 820, CreatedAt: created}
+		p := Recharge{ID: paymentID, UserID: u.ID, AmountFen: 820, Provider: "epay", PayType: "2", Token: paymentID, Reference: orderID, CreatedAt: created}
+		if createErr := s.CreateSMSPayment(u, o, p); createErr != nil {
+			t.Fatal(createErr)
+		}
+	}
+	create("SOLD", "POLD", old)
+	create("SFRESH", "PFRESH", fresh)
+	create("SPAID", "PPAID", old)
+	if _, err = s.CompleteSMSPayment("PPAID", "trade-paid"); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := s.DeleteExpiredUnpaidSMS(time.Now().Add(-20*time.Minute).UTC().Format(time.RFC3339), 100)
+	if err != nil || deleted != 1 {
+		t.Fatalf("deleted=%d err=%v", deleted, err)
+	}
+	if _, err = s.GetSMSByID("SOLD"); err == nil {
+		t.Fatal("expired unpaid order still exists")
+	}
+	if _, err = s.GetRecharge("POLD"); err == nil {
+		t.Fatal("expired pending payment still exists")
+	}
+	if _, err = s.GetSMSByID("SFRESH"); err != nil {
+		t.Fatal("fresh unpaid order was deleted")
+	}
+	if paid, getErr := s.GetSMSByID("SPAID"); getErr != nil || paid.Status != "paid" {
+		t.Fatalf("paid order=%+v err=%v", paid, getErr)
+	}
+}

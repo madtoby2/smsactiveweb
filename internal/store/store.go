@@ -507,6 +507,55 @@ func (s *Store) SetRechargeStatus(id, status string) error {
 	}
 	return tx.Commit()
 }
+
+func (s *Store) DeleteExpiredUnpaidSMS(before string, limit int) (int64, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(`SELECT o.id,r.id FROM sms_orders o JOIN recharges r ON r.reference=o.id WHERE o.status='awaiting_payment' AND r.status='pending' AND o.created_at<=? ORDER BY o.created_at LIMIT ?`, before, limit)
+	if err != nil {
+		return 0, err
+	}
+	type expiredOrder struct{ orderID, rechargeID string }
+	var expired []expiredOrder
+	for rows.Next() {
+		var item expiredOrder
+		if err = rows.Scan(&item.orderID, &item.rechargeID); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		expired = append(expired, item)
+	}
+	if err = rows.Close(); err != nil {
+		return 0, err
+	}
+	var deleted int64
+	for _, item := range expired {
+		result, deleteErr := tx.Exec(`DELETE FROM recharges WHERE id=? AND reference=? AND status='pending'`, item.rechargeID, item.orderID)
+		if deleteErr != nil {
+			return 0, deleteErr
+		}
+		removedRecharge, _ := result.RowsAffected()
+		if removedRecharge != 1 {
+			continue
+		}
+		result, deleteErr = tx.Exec(`DELETE FROM sms_orders WHERE id=? AND status='awaiting_payment'`, item.orderID)
+		if deleteErr != nil {
+			return 0, deleteErr
+		}
+		removedOrder, _ := result.RowsAffected()
+		deleted += removedOrder
+	}
+	if err = tx.Commit(); err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
 func (s *Store) GetRecharge(id string) (Recharge, error) {
 	var r Recharge
 	e := s.DB.QueryRow(`SELECT id,user_id,amount_fen,provider,pay_type,status,COALESCE(provider_id,''),token,reference,created_at FROM recharges WHERE id=?`, id).Scan(&r.ID, &r.UserID, &r.AmountFen, &r.Provider, &r.PayType, &r.Status, &r.ProviderID, &r.Token, &r.Reference, &r.CreatedAt)

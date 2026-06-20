@@ -49,6 +49,9 @@ func New(c config.Config, s *store.Store) *Server {
 	if c.AutoReplaceScan < time.Second {
 		c.AutoReplaceScan = 10 * time.Second
 	}
+	if c.PaymentOrderTTL < time.Minute {
+		c.PaymentOrderTTL = 20 * time.Minute
+	}
 	return &Server{C: c, Store: s, Hero: hero.New(c.HeroKey, c.HeroURL, c.HeroCurrency), SMSMan: smsman.New(c.SMSManToken, c.SMSManURL), SMSCache: newSMSManCatalogCache(), YSM: yishoumi.New(c.YSMAppID, c.YSMSecret, c.YSMURL), EPay: epay.New(c.EPayPID, c.EPayKey, c.EPayURL)}
 }
 func (s *Server) Routes() http.Handler {
@@ -344,6 +347,7 @@ func (s *Server) RunAutoReplace(ctx context.Context) {
 	}
 	ticker := time.NewTicker(s.C.AutoReplaceScan)
 	defer ticker.Stop()
+	s.runExpiredPaymentCleanup()
 	s.runPaidOrderBatch(ctx)
 	s.runAutoReplaceBatch(ctx)
 	for {
@@ -351,10 +355,23 @@ func (s *Server) RunAutoReplace(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			s.runExpiredPaymentCleanup()
 			s.runPaidOrderBatch(ctx)
 			s.runAutoReplaceBatch(ctx)
 			s.runReplacingBatch(ctx)
 		}
+	}
+}
+
+func (s *Server) runExpiredPaymentCleanup() {
+	before := time.Now().UTC().Add(-s.C.PaymentOrderTTL).Format(time.RFC3339)
+	deleted, err := s.Store.DeleteExpiredUnpaidSMS(before, 100)
+	if err != nil {
+		log.Printf("expired payment cleanup failed: %v", err)
+		return
+	}
+	if deleted > 0 {
+		log.Printf("deleted %d expired unpaid SMS orders", deleted)
 	}
 }
 

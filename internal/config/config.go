@@ -11,14 +11,14 @@ import (
 )
 
 type Config struct {
-	Port, BaseURL, HeroKey, HeroURL, HeroCurrency string
-	SMSManToken, SMSManURL                        string
-	USDCNY, SMSManCNYRate, Markup                 float64
-	PayProvider, YSMAppID, YSMSecret, YSMURL      string
-	EPayPID, EPayKey, EPayURL                     string
-	AllowLiveSMSInSandbox                         bool
-	AutoReplaceAfter, AutoReplaceScan             time.Duration
-	AutoReplaceMax                                int
+	Port, BaseURL, HeroKey, HeroURL, HeroCurrency      string
+	SMSManToken, SMSManURL                             string
+	USDCNY, SMSManCNYRate, Markup                      float64
+	PayProvider, YSMAppID, YSMSecret, YSMURL           string
+	EPayPID, EPayKey, EPayURL                          string
+	AllowLiveSMSInSandbox                              bool
+	AutoReplaceAfter, AutoReplaceScan, PaymentOrderTTL time.Duration
+	AutoReplaceMax                                     int
 }
 
 func (c Config) Validate() error {
@@ -83,6 +83,7 @@ func Load() Config {
 		AutoReplaceAfter:      time.Duration(envInt("SMS_AUTO_REPLACE_AFTER_SECONDS", 180)) * time.Second,
 		AutoReplaceMax:        envInt("SMS_AUTO_REPLACE_MAX_ATTEMPTS", 0),
 		AutoReplaceScan:       time.Duration(envInt("SMS_AUTO_REPLACE_SCAN_SECONDS", 10)) * time.Second,
+		PaymentOrderTTL:       time.Duration(envInt("PAYMENT_ORDER_TTL_MINUTES", 20)) * time.Minute,
 	}
 }
 
