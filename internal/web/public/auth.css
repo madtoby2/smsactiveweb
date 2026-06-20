@@ -1,4 +1,17 @@
+.reasons {
+  margin-top: 35px;
+}
+
+.reasons-title {
+  margin: 0 0 12px;
+  color: #4c5e78;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: .08em;
+}
+
 .trust {
+  margin-top: 0;
   gap: 24px;
   flex-wrap: wrap;
 }
