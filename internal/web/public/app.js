@@ -90,6 +90,7 @@ function showApp(data) {
 $('#toggleAuth').onclick = () => {
   state.register = !state.register;
   $('#authTitle').textContent = state.register ? '创建账户' : '登录账户';
+  $('#authSubmit').textContent = state.register ? '创建账户' : '登录';
   $('#toggleAuth').textContent = state.register ? '已有账户？返回登录' : '没有账户？立即注册';
 };
 $('#authForm').onsubmit = async event => {
