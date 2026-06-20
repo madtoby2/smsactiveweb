@@ -20,6 +20,8 @@ go run .
 
 打开 `http://localhost:3000`。本仓库当前 `.env` 已包含本机使用的 HeroSMS 密钥且被 Git 忽略。
 
+SMS-Man 客户端可通过 `SMSMAN_API_TOKEN` 和 `SMSMAN_BASE_URL` 配置。Token 为空时不会向 SMS-Man 发起请求；当前已实现国家、应用、库存原始数据、取号、查码和拒绝退款接口，后续聚合选价启用前仍以 HeroSMS 为实际取号上游。
+
 自动换号可通过 `SMS_AUTO_REPLACE_AFTER_SECONDS`、`SMS_AUTO_REPLACE_MAX_ATTEMPTS` 和 `SMS_AUTO_REPLACE_SCAN_SECONDS` 调整。`SMS_AUTO_REPLACE_MAX_ATTEMPTS=0` 表示持续换号。HeroSMS 前 120 秒不允许取消，因此等待时间会被限制在 120 至 900 秒。
 
 ## 启用易收米
