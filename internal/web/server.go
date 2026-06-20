@@ -243,7 +243,7 @@ func (s *Server) purchase(w http.ResponseWriter, r *http.Request, u store.User) 
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	o := store.SMSOrder{ID: store.ID("S"), UserID: u.ID, Country: in.Country, Service: in.Service, UpstreamCost: offer.Cost, PriceFen: pricing.SaleFen(offer.Cost, s.C.USDCNY, s.C.Markup), AutoReplace: true, CreatedAt: now}
+	o := store.SMSOrder{ID: store.ID("S"), UserID: u.ID, UpstreamProvider: "hero", Country: in.Country, Service: in.Service, UpstreamCost: offer.Cost, PriceFen: pricing.SaleFen(offer.Cost, s.C.USDCNY, s.C.Markup), AutoReplace: true, CreatedAt: now}
 	raw, _ := store.Token()
 	payment := store.Recharge{ID: store.ID("P"), UserID: u.ID, AmountFen: o.PriceFen, Provider: s.C.PayProvider, PayType: strconv.Itoa(in.PayType), Token: raw, Reference: o.ID, CreatedAt: now}
 	if e = s.Store.CreateSMSPayment(u, o, payment); e != nil {
@@ -342,7 +342,7 @@ func (s *Server) cancel(w http.ResponseWriter, r *http.Request, u store.User) {
 		fail(w, 409, "上游未确认取消")
 		return
 	}
-	_ = s.Store.EndCurrentAttempt(o.ID, o.UpstreamID, "cancelled")
+	_ = s.Store.EndCurrentAttemptWithProvider(o.ID, o.UpstreamProvider, o.UpstreamID, "cancelled")
 	if e = s.Store.RefundSMS(o.ID, "cancelled"); e != nil {
 		fail(w, 500, e)
 		return
@@ -396,7 +396,7 @@ func (s *Server) fulfillPaidOrder(ctx context.Context, o store.SMSOrder) {
 		log.Printf("paid SMS order %s is waiting for inventory: %v", o.ID, err)
 		return
 	}
-	if err = s.Store.ActivateSMS(o.ID, act.ID, act.Phone, act.Cost); err != nil {
+	if err = s.Store.ActivateSMSWithProvider(o.ID, o.UpstreamProvider, act.ID, act.Phone, act.Cost); err != nil {
 		_ = s.Store.ReleasePaidSMS(o.ID)
 		log.Printf("paid SMS order %s activation persistence failed: %v", o.ID, err)
 	}
@@ -472,14 +472,14 @@ func (s *Server) replaceNumber(ctx context.Context, o store.SMSOrder) {
 }
 
 func (s *Server) acquireReplacement(ctx context.Context, o store.SMSOrder) {
-	_ = s.Store.EndCurrentAttempt(o.ID, o.UpstreamID, "cancelled")
+	_ = s.Store.EndCurrentAttemptWithProvider(o.ID, o.UpstreamProvider, o.UpstreamID, "cancelled")
 	act, err := s.Hero.Acquire(ctx, o.Country, o.Service, o.UpstreamCost)
 	if err != nil {
 		_ = s.Store.TouchReplacing(o.ID)
 		log.Printf("auto replace waiting for inventory for %s: %v", o.ID, err)
 		return
 	}
-	if err = s.Store.ReplaceActivation(o.ID, o.UpstreamID, act.ID, act.Phone, act.Cost); err != nil {
+	if err = s.Store.ReplaceActivationWithProvider(o.ID, o.UpstreamProvider, o.UpstreamID, o.UpstreamProvider, act.ID, act.Phone, act.Cost); err != nil {
 		log.Printf("auto replace persistence failed for %s: %v", o.ID, err)
 	}
 }

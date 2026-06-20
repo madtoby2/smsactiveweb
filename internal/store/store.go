@@ -20,20 +20,44 @@ type User struct {
 	Balance int64  `json:"balanceFen"`
 }
 type SMSOrder struct {
-	ID                                                string `json:"id"`
-	UserID                                            int64  `json:"-"`
-	UpstreamID, Country, Service, Phone, Status, Code string
-	UpstreamCost                                      float64
-	PriceFen                                          int64
-	AutoReplace                                       bool
-	ReplaceAttempts                                   int
-	LastNumberAt, CreatedAt                           string
+	ID               string `json:"id"`
+	UserID           int64  `json:"-"`
+	UpstreamID       string `json:"-"`
+	UpstreamProvider string `json:"-"`
+	Country          string
+	Service          string
+	Phone            string
+	Status           string
+	Code             string
+	UpstreamCost     float64 `json:"-"`
+	PriceFen         int64
+	AutoReplace      bool
+	ReplaceAttempts  int
+	LastNumberAt     string
+	CreatedAt        string
 }
 type Recharge struct {
 	ID                                                      string `json:"id"`
 	UserID, AmountFen                                       int64
 	Provider, PayType, Status, ProviderID, Token, Reference string
 	CreatedAt                                               string
+}
+
+const smsOrderSelect = `SELECT id,user_id,COALESCE(upstream_id,''),upstream_provider,country,service,COALESCE(phone,''),status,COALESCE(code,''),upstream_cost,price_fen,auto_replace,replace_attempts,last_number_at,created_at FROM sms_orders`
+
+type scanner interface {
+	Scan(dest ...any) error
+}
+
+func scanSMS(row scanner, order *SMSOrder) error {
+	return row.Scan(&order.ID, &order.UserID, &order.UpstreamID, &order.UpstreamProvider, &order.Country, &order.Service, &order.Phone, &order.Status, &order.Code, &order.UpstreamCost, &order.PriceFen, &order.AutoReplace, &order.ReplaceAttempts, &order.LastNumberAt, &order.CreatedAt)
+}
+
+func providerOrHero(provider string) string {
+	if provider == "" {
+		return "hero"
+	}
+	return provider
 }
 
 const sessionLifetime = 30 * 24 * time.Hour
@@ -51,8 +75,8 @@ func Open(path string) (*Store, error) {
 	_, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,email TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,balance_fen INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL,expires_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id));
-CREATE TABLE IF NOT EXISTS sms_orders(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,upstream_id TEXT UNIQUE,country TEXT NOT NULL,service TEXT NOT NULL,phone TEXT,status TEXT NOT NULL,code TEXT,upstream_cost REAL NOT NULL,price_fen INTEGER NOT NULL,refunded INTEGER NOT NULL DEFAULT 0,auto_replace INTEGER NOT NULL DEFAULT 0,replace_attempts INTEGER NOT NULL DEFAULT 0,last_number_at TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id));
-CREATE TABLE IF NOT EXISTS sms_attempts(id INTEGER PRIMARY KEY,order_id TEXT NOT NULL,upstream_id TEXT NOT NULL UNIQUE,phone TEXT NOT NULL,status TEXT NOT NULL,upstream_cost REAL NOT NULL,started_at TEXT NOT NULL,ended_at TEXT,FOREIGN KEY(order_id) REFERENCES sms_orders(id));
+CREATE TABLE IF NOT EXISTS sms_orders(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,upstream_id TEXT,upstream_provider TEXT NOT NULL DEFAULT 'hero',country TEXT NOT NULL,service TEXT NOT NULL,phone TEXT,status TEXT NOT NULL,code TEXT,upstream_cost REAL NOT NULL,price_fen INTEGER NOT NULL,refunded INTEGER NOT NULL DEFAULT 0,auto_replace INTEGER NOT NULL DEFAULT 0,replace_attempts INTEGER NOT NULL DEFAULT 0,last_number_at TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id),UNIQUE(upstream_provider,upstream_id));
+CREATE TABLE IF NOT EXISTS sms_attempts(id INTEGER PRIMARY KEY,order_id TEXT NOT NULL,upstream_id TEXT NOT NULL,upstream_provider TEXT NOT NULL DEFAULT 'hero',phone TEXT NOT NULL,status TEXT NOT NULL,upstream_cost REAL NOT NULL,started_at TEXT NOT NULL,ended_at TEXT,FOREIGN KEY(order_id) REFERENCES sms_orders(id),UNIQUE(upstream_provider,upstream_id));
 CREATE TABLE IF NOT EXISTS recharges(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,amount_fen INTEGER NOT NULL,provider TEXT NOT NULL,pay_type TEXT NOT NULL,status TEXT NOT NULL,provider_id TEXT,token TEXT NOT NULL,reference TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS ledger(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,amount_fen INTEGER NOT NULL,kind TEXT NOT NULL,reference TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id));`)
 	if err != nil {
@@ -70,7 +94,11 @@ CREATE TABLE IF NOT EXISTS ledger(id INTEGER PRIMARY KEY,user_id INTEGER NOT NUL
 			return nil, e
 		}
 	}
-	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS sms_attempts(id INTEGER PRIMARY KEY,order_id TEXT NOT NULL,upstream_id TEXT NOT NULL UNIQUE,phone TEXT NOT NULL,status TEXT NOT NULL,upstream_cost REAL NOT NULL,started_at TEXT NOT NULL,ended_at TEXT,FOREIGN KEY(order_id) REFERENCES sms_orders(id))`); err != nil {
+	if err = migrateUpstreamProviders(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS sms_attempts(id INTEGER PRIMARY KEY,order_id TEXT NOT NULL,upstream_id TEXT NOT NULL,upstream_provider TEXT NOT NULL DEFAULT 'hero',phone TEXT NOT NULL,status TEXT NOT NULL,upstream_cost REAL NOT NULL,started_at TEXT NOT NULL,ended_at TEXT,FOREIGN KEY(order_id) REFERENCES sms_orders(id),UNIQUE(upstream_provider,upstream_id))`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -81,6 +109,58 @@ CREATE TABLE IF NOT EXISTS ledger(id INTEGER PRIMARY KEY,user_id INTEGER NOT NUL
 	return s, nil
 }
 func (s *Store) Close() { s.DB.Close() }
+
+func migrateUpstreamProviders(db *sql.DB) error {
+	hasProvider, err := hasColumn(db, "sms_orders", "upstream_provider")
+	if err != nil || hasProvider {
+		return err
+	}
+	if _, err = db.Exec("PRAGMA foreign_keys=OFF"); err != nil {
+		return err
+	}
+	defer db.Exec("PRAGMA foreign_keys=ON")
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	statements := []string{
+		`CREATE TABLE sms_orders_new(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,upstream_id TEXT,upstream_provider TEXT NOT NULL DEFAULT 'hero',country TEXT NOT NULL,service TEXT NOT NULL,phone TEXT,status TEXT NOT NULL,code TEXT,upstream_cost REAL NOT NULL,price_fen INTEGER NOT NULL,refunded INTEGER NOT NULL DEFAULT 0,auto_replace INTEGER NOT NULL DEFAULT 0,replace_attempts INTEGER NOT NULL DEFAULT 0,last_number_at TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id),UNIQUE(upstream_provider,upstream_id))`,
+		`INSERT INTO sms_orders_new(id,user_id,upstream_id,upstream_provider,country,service,phone,status,code,upstream_cost,price_fen,refunded,auto_replace,replace_attempts,last_number_at,created_at) SELECT id,user_id,upstream_id,'hero',country,service,phone,status,code,upstream_cost,price_fen,refunded,auto_replace,replace_attempts,last_number_at,created_at FROM sms_orders`,
+		`CREATE TABLE sms_attempts_new(id INTEGER PRIMARY KEY,order_id TEXT NOT NULL,upstream_id TEXT NOT NULL,upstream_provider TEXT NOT NULL DEFAULT 'hero',phone TEXT NOT NULL,status TEXT NOT NULL,upstream_cost REAL NOT NULL,started_at TEXT NOT NULL,ended_at TEXT,FOREIGN KEY(order_id) REFERENCES sms_orders_new(id),UNIQUE(upstream_provider,upstream_id))`,
+		`INSERT INTO sms_attempts_new(id,order_id,upstream_id,upstream_provider,phone,status,upstream_cost,started_at,ended_at) SELECT id,order_id,upstream_id,'hero',phone,status,upstream_cost,started_at,ended_at FROM sms_attempts`,
+		`DROP TABLE sms_attempts`,
+		`DROP TABLE sms_orders`,
+		`ALTER TABLE sms_orders_new RENAME TO sms_orders`,
+		`ALTER TABLE sms_attempts_new RENAME TO sms_attempts`,
+	}
+	for _, statement := range statements {
+		if _, err = tx.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, kind string
+		var defaultValue any
+		if err = rows.Scan(&cid, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
 
 func Password(password string) (string, error) {
 	if len(password) < 8 {
@@ -179,7 +259,7 @@ func (s *Store) CreateSMS(u User, o SMSOrder) error {
 	if n != 1 {
 		return errors.New("余额不足")
 	}
-	_, e = tx.Exec(`INSERT INTO sms_orders(id,user_id,country,service,status,upstream_cost,price_fen,auto_replace,created_at)VALUES(?,?,?,?,?,?,?,?,?)`, o.ID, u.ID, o.Country, o.Service, "purchasing", o.UpstreamCost, o.PriceFen, o.AutoReplace, o.CreatedAt)
+	_, e = tx.Exec(`INSERT INTO sms_orders(id,user_id,upstream_provider,country,service,status,upstream_cost,price_fen,auto_replace,created_at)VALUES(?,?,?,?,?,?,?,?,?,?)`, o.ID, u.ID, providerOrHero(o.UpstreamProvider), o.Country, o.Service, "purchasing", o.UpstreamCost, o.PriceFen, o.AutoReplace, o.CreatedAt)
 	if e != nil {
 		return e
 	}
@@ -196,7 +276,7 @@ func (s *Store) CreateSMSPayment(u User, o SMSOrder, p Recharge) error {
 		return e
 	}
 	defer tx.Rollback()
-	if _, e = tx.Exec(`INSERT INTO sms_orders(id,user_id,country,service,status,upstream_cost,price_fen,auto_replace,created_at)VALUES(?,?,?,?,?,?,?,?,?)`, o.ID, u.ID, o.Country, o.Service, "awaiting_payment", o.UpstreamCost, o.PriceFen, o.AutoReplace, o.CreatedAt); e != nil {
+	if _, e = tx.Exec(`INSERT INTO sms_orders(id,user_id,upstream_provider,country,service,status,upstream_cost,price_fen,auto_replace,created_at)VALUES(?,?,?,?,?,?,?,?,?,?)`, o.ID, u.ID, providerOrHero(o.UpstreamProvider), o.Country, o.Service, "awaiting_payment", o.UpstreamCost, o.PriceFen, o.AutoReplace, o.CreatedAt); e != nil {
 		return e
 	}
 	if _, e = tx.Exec(`INSERT INTO recharges(id,user_id,amount_fen,provider,pay_type,status,token,reference,created_at)VALUES(?,?,?,?,?,'pending',?,?,?)`, p.ID, u.ID, p.AmountFen, p.Provider, p.PayType, p.Token, o.ID, p.CreatedAt); e != nil {
@@ -205,16 +285,21 @@ func (s *Store) CreateSMSPayment(u User, o SMSOrder, p Recharge) error {
 	return tx.Commit()
 }
 func (s *Store) ActivateSMS(id, upstream, phone string, cost float64) error {
+	return s.ActivateSMSWithProvider(id, "hero", upstream, phone, cost)
+}
+
+func (s *Store) ActivateSMSWithProvider(id, provider, upstream, phone string, cost float64) error {
 	tx, e := s.DB.Begin()
 	if e != nil {
 		return e
 	}
 	defer tx.Rollback()
 	now := time.Now().UTC().Format(time.RFC3339)
-	if _, e = tx.Exec("UPDATE sms_orders SET upstream_id=?,phone=?,upstream_cost=?,status='waiting',last_number_at=? WHERE id=?", upstream, phone, cost, now, id); e != nil {
+	provider = providerOrHero(provider)
+	if _, e = tx.Exec("UPDATE sms_orders SET upstream_id=?,upstream_provider=?,phone=?,upstream_cost=?,status='waiting',last_number_at=? WHERE id=?", upstream, provider, phone, cost, now, id); e != nil {
 		return e
 	}
-	if _, e = tx.Exec("INSERT INTO sms_attempts(order_id,upstream_id,phone,status,upstream_cost,started_at)VALUES(?,?,?,?,?,?)", id, upstream, phone, "waiting", cost, now); e != nil {
+	if _, e = tx.Exec("INSERT INTO sms_attempts(order_id,upstream_id,upstream_provider,phone,status,upstream_cost,started_at)VALUES(?,?,?,?,?,?,?)", id, upstream, provider, phone, "waiting", cost, now); e != nil {
 		return e
 	}
 	return tx.Commit()
@@ -247,12 +332,12 @@ func (s *Store) RefundSMS(id, reason string) error {
 }
 func (s *Store) GetSMS(id string, uid int64) (SMSOrder, error) {
 	var o SMSOrder
-	e := s.DB.QueryRow(`SELECT id,user_id,COALESCE(upstream_id,''),country,service,COALESCE(phone,''),status,COALESCE(code,''),upstream_cost,price_fen,auto_replace,replace_attempts,last_number_at,created_at FROM sms_orders WHERE id=? AND user_id=?`, id, uid).Scan(&o.ID, &o.UserID, &o.UpstreamID, &o.Country, &o.Service, &o.Phone, &o.Status, &o.Code, &o.UpstreamCost, &o.PriceFen, &o.AutoReplace, &o.ReplaceAttempts, &o.LastNumberAt, &o.CreatedAt)
+	e := scanSMS(s.DB.QueryRow(smsOrderSelect+` WHERE id=? AND user_id=?`, id, uid), &o)
 	return o, e
 }
 func (s *Store) GetSMSByID(id string) (SMSOrder, error) {
 	var o SMSOrder
-	e := s.DB.QueryRow(`SELECT id,user_id,COALESCE(upstream_id,''),country,service,COALESCE(phone,''),status,COALESCE(code,''),upstream_cost,price_fen,auto_replace,replace_attempts,last_number_at,created_at FROM sms_orders WHERE id=?`, id).Scan(&o.ID, &o.UserID, &o.UpstreamID, &o.Country, &o.Service, &o.Phone, &o.Status, &o.Code, &o.UpstreamCost, &o.PriceFen, &o.AutoReplace, &o.ReplaceAttempts, &o.LastNumberAt, &o.CreatedAt)
+	e := scanSMS(s.DB.QueryRow(smsOrderSelect+` WHERE id=?`, id), &o)
 	return o, e
 }
 func (s *Store) UpdateSMS(id, status, code string) error {
@@ -260,7 +345,7 @@ func (s *Store) UpdateSMS(id, status, code string) error {
 	return e
 }
 func (s *Store) ListSMS(uid int64) ([]SMSOrder, error) {
-	rows, e := s.DB.Query(`SELECT id,user_id,COALESCE(upstream_id,''),country,service,COALESCE(phone,''),status,COALESCE(code,''),upstream_cost,price_fen,auto_replace,replace_attempts,last_number_at,created_at FROM sms_orders WHERE user_id=? ORDER BY created_at DESC LIMIT 100`, uid)
+	rows, e := s.DB.Query(smsOrderSelect+` WHERE user_id=? ORDER BY created_at DESC LIMIT 100`, uid)
 	if e != nil {
 		return nil, e
 	}
@@ -268,7 +353,7 @@ func (s *Store) ListSMS(uid int64) ([]SMSOrder, error) {
 	out := []SMSOrder{}
 	for rows.Next() {
 		var o SMSOrder
-		if e = rows.Scan(&o.ID, &o.UserID, &o.UpstreamID, &o.Country, &o.Service, &o.Phone, &o.Status, &o.Code, &o.UpstreamCost, &o.PriceFen, &o.AutoReplace, &o.ReplaceAttempts, &o.LastNumberAt, &o.CreatedAt); e != nil {
+		if e = scanSMS(rows, &o); e != nil {
 			return nil, e
 		}
 		out = append(out, o)
@@ -277,7 +362,7 @@ func (s *Store) ListSMS(uid int64) ([]SMSOrder, error) {
 }
 
 func (s *Store) ListPaidSMS(limit int) ([]SMSOrder, error) {
-	rows, e := s.DB.Query(`SELECT id,user_id,COALESCE(upstream_id,''),country,service,COALESCE(phone,''),status,COALESCE(code,''),upstream_cost,price_fen,auto_replace,replace_attempts,last_number_at,created_at FROM sms_orders WHERE status='paid' ORDER BY created_at LIMIT ?`, limit)
+	rows, e := s.DB.Query(smsOrderSelect+` WHERE status='paid' ORDER BY created_at LIMIT ?`, limit)
 	if e != nil {
 		return nil, e
 	}
@@ -285,7 +370,7 @@ func (s *Store) ListPaidSMS(limit int) ([]SMSOrder, error) {
 	var out []SMSOrder
 	for rows.Next() {
 		var o SMSOrder
-		if e = rows.Scan(&o.ID, &o.UserID, &o.UpstreamID, &o.Country, &o.Service, &o.Phone, &o.Status, &o.Code, &o.UpstreamCost, &o.PriceFen, &o.AutoReplace, &o.ReplaceAttempts, &o.LastNumberAt, &o.CreatedAt); e != nil {
+		if e = scanSMS(rows, &o); e != nil {
 			return nil, e
 		}
 		out = append(out, o)
@@ -308,7 +393,7 @@ func (s *Store) ReleasePaidSMS(id string) error {
 }
 
 func (s *Store) ListDueAutoReplace(before string, max, limit int) ([]SMSOrder, error) {
-	rows, e := s.DB.Query(`SELECT id,user_id,COALESCE(upstream_id,''),country,service,COALESCE(phone,''),status,COALESCE(code,''),upstream_cost,price_fen,auto_replace,replace_attempts,last_number_at,created_at FROM sms_orders WHERE auto_replace=1 AND status='waiting' AND COALESCE(code,'')='' AND (?=0 OR replace_attempts<?) AND last_number_at<>'' AND last_number_at<=? ORDER BY last_number_at LIMIT ?`, max, max, before, limit)
+	rows, e := s.DB.Query(smsOrderSelect+` WHERE auto_replace=1 AND status='waiting' AND COALESCE(code,'')='' AND (?=0 OR replace_attempts<?) AND last_number_at<>'' AND last_number_at<=? ORDER BY last_number_at LIMIT ?`, max, max, before, limit)
 	if e != nil {
 		return nil, e
 	}
@@ -316,7 +401,7 @@ func (s *Store) ListDueAutoReplace(before string, max, limit int) ([]SMSOrder, e
 	var out []SMSOrder
 	for rows.Next() {
 		var o SMSOrder
-		if e = rows.Scan(&o.ID, &o.UserID, &o.UpstreamID, &o.Country, &o.Service, &o.Phone, &o.Status, &o.Code, &o.UpstreamCost, &o.PriceFen, &o.AutoReplace, &o.ReplaceAttempts, &o.LastNumberAt, &o.CreatedAt); e != nil {
+		if e = scanSMS(rows, &o); e != nil {
 			return nil, e
 		}
 		out = append(out, o)
@@ -325,7 +410,7 @@ func (s *Store) ListDueAutoReplace(before string, max, limit int) ([]SMSOrder, e
 }
 
 func (s *Store) ListReplacing(limit int) ([]SMSOrder, error) {
-	rows, e := s.DB.Query(`SELECT id,user_id,COALESCE(upstream_id,''),country,service,COALESCE(phone,''),status,COALESCE(code,''),upstream_cost,price_fen,auto_replace,replace_attempts,last_number_at,created_at FROM sms_orders WHERE status='replacing' ORDER BY last_number_at LIMIT ?`, limit)
+	rows, e := s.DB.Query(smsOrderSelect+` WHERE status='replacing' ORDER BY last_number_at LIMIT ?`, limit)
 	if e != nil {
 		return nil, e
 	}
@@ -333,7 +418,7 @@ func (s *Store) ListReplacing(limit int) ([]SMSOrder, error) {
 	var out []SMSOrder
 	for rows.Next() {
 		var o SMSOrder
-		if e = rows.Scan(&o.ID, &o.UserID, &o.UpstreamID, &o.Country, &o.Service, &o.Phone, &o.Status, &o.Code, &o.UpstreamCost, &o.PriceFen, &o.AutoReplace, &o.ReplaceAttempts, &o.LastNumberAt, &o.CreatedAt); e != nil {
+		if e = scanSMS(rows, &o); e != nil {
 			return nil, e
 		}
 		out = append(out, o)
@@ -361,26 +446,36 @@ func (s *Store) TouchReplacing(id string) error {
 }
 
 func (s *Store) ReplaceActivation(id, oldUpstream, upstream, phone string, cost float64) error {
+	return s.ReplaceActivationWithProvider(id, "hero", oldUpstream, "hero", upstream, phone, cost)
+}
+
+func (s *Store) ReplaceActivationWithProvider(id, oldProvider, oldUpstream, provider, upstream, phone string, cost float64) error {
 	tx, e := s.DB.Begin()
 	if e != nil {
 		return e
 	}
 	defer tx.Rollback()
 	now := time.Now().UTC().Format(time.RFC3339)
-	if _, e = tx.Exec("UPDATE sms_attempts SET status='cancelled',ended_at=? WHERE order_id=? AND upstream_id=?", now, id, oldUpstream); e != nil {
+	oldProvider = providerOrHero(oldProvider)
+	provider = providerOrHero(provider)
+	if _, e = tx.Exec("UPDATE sms_attempts SET status='cancelled',ended_at=? WHERE order_id=? AND upstream_provider=? AND upstream_id=?", now, id, oldProvider, oldUpstream); e != nil {
 		return e
 	}
-	if _, e = tx.Exec("UPDATE sms_orders SET upstream_id=?,phone=?,upstream_cost=?,status='waiting',replace_attempts=replace_attempts+1,last_number_at=? WHERE id=? AND status='replacing'", upstream, phone, cost, now, id); e != nil {
+	if _, e = tx.Exec("UPDATE sms_orders SET upstream_id=?,upstream_provider=?,phone=?,upstream_cost=?,status='waiting',replace_attempts=replace_attempts+1,last_number_at=? WHERE id=? AND status='replacing'", upstream, provider, phone, cost, now, id); e != nil {
 		return e
 	}
-	if _, e = tx.Exec("INSERT INTO sms_attempts(order_id,upstream_id,phone,status,upstream_cost,started_at)VALUES(?,?,?,?,?,?)", id, upstream, phone, "waiting", cost, now); e != nil {
+	if _, e = tx.Exec("INSERT INTO sms_attempts(order_id,upstream_id,upstream_provider,phone,status,upstream_cost,started_at)VALUES(?,?,?,?,?,?,?)", id, upstream, provider, phone, "waiting", cost, now); e != nil {
 		return e
 	}
 	return tx.Commit()
 }
 
 func (s *Store) EndCurrentAttempt(id, upstream, status string) error {
-	_, e := s.DB.Exec("UPDATE sms_attempts SET status=?,ended_at=? WHERE order_id=? AND upstream_id=?", status, time.Now().UTC().Format(time.RFC3339), id, upstream)
+	return s.EndCurrentAttemptWithProvider(id, "hero", upstream, status)
+}
+
+func (s *Store) EndCurrentAttemptWithProvider(id, provider, upstream, status string) error {
+	_, e := s.DB.Exec("UPDATE sms_attempts SET status=?,ended_at=? WHERE order_id=? AND upstream_provider=? AND upstream_id=?", status, time.Now().UTC().Format(time.RFC3339), id, providerOrHero(provider), upstream)
 	return e
 }
 
