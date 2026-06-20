@@ -13,6 +13,7 @@ import (
 type Config struct {
 	Port, BaseURL, HeroKey, HeroURL, HeroCurrency      string
 	SMSManToken, SMSManURL                             string
+	AdminEmail, AdminPassword                          string
 	USDCNY, SMSManCNYRate, Markup                      float64
 	PayProvider, YSMAppID, YSMSecret, YSMURL           string
 	EPayPID, EPayKey, EPayURL                          string
@@ -76,6 +77,7 @@ func Load() Config {
 		Port: env("PORT", "3000"), BaseURL: env("APP_BASE_URL", "http://localhost:3000"),
 		HeroKey: os.Getenv("HEROSMS_API_KEY"), HeroURL: env("HEROSMS_BASE_URL", "https://hero-sms.com/stubs/handler_api.php"), HeroCurrency: env("HEROSMS_CURRENCY", "840"),
 		SMSManToken: os.Getenv("SMSMAN_API_TOKEN"), SMSManURL: env("SMSMAN_BASE_URL", "https://api.sms-man.com/control"),
+		AdminEmail: strings.ToLower(strings.TrimSpace(env("ADMIN_EMAIL", "admin@local"))), AdminPassword: os.Getenv("ADMIN_PASSWORD"),
 		USDCNY: envFloat("USD_CNY_RATE", 7.2), SMSManCNYRate: envFloat("SMSMAN_PRICE_CNY_RATE", 0.08), Markup: envFloat("PRICE_MARKUP_CNY", 1),
 		PayProvider: env("PAY_PROVIDER", "sandbox"), YSMAppID: os.Getenv("YSM_APP_ID"), YSMSecret: os.Getenv("YSM_SECRET"), YSMURL: env("YSM_BASE_URL", "https://www.yishoumi.cn"),
 		EPayPID: os.Getenv("EPAY_PID"), EPayKey: os.Getenv("EPAY_KEY"), EPayURL: env("EPAY_BASE_URL", "https://50pay.xiajuan88.com"),

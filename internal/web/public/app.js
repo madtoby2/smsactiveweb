@@ -81,11 +81,47 @@ function showApp(data) {
   $('#auth').classList.add('hidden');
   $('#app').classList.remove('hidden');
   $('#logout').classList.remove('hidden');
+  $('#supportOpen').classList.remove('hidden');
   if (!state.liveSmsPurchaseEnabled) {
     $('#buy').textContent = '支付取号演示模式';
     $('#stock').textContent = '演示环境暂不分配真实号码';
   }
 }
+
+let supportTimer;
+$('#supportOpen').onclick = async () => {
+  $('#supportPanel').classList.remove('hidden');
+  await Promise.all([loadSupportSettings(), loadSupportMessages()]).catch(error => toast(error.message));
+  clearInterval(supportTimer);
+  supportTimer = setInterval(() => loadSupportMessages().catch(() => {}), 5000);
+};
+$('#supportClose').onclick = () => { $('#supportPanel').classList.add('hidden'); clearInterval(supportTimer); };
+async function loadSupportSettings() {
+  const settings = await api('/api/settings');
+  $('#supportTitle').textContent = settings.contactTitle || '在线客服';
+  $('#supportHours').textContent = settings.supportHours || '';
+  const link = $('#contactLink');
+  if (settings.contactValue) {
+    link.textContent = settings.contactValue;
+    if (settings.contactURL) link.href = settings.contactURL;
+    else link.removeAttribute('href');
+    link.classList.remove('hidden');
+  } else link.classList.add('hidden');
+}
+async function loadSupportMessages() {
+  const messages = await api('/api/support');
+  const box = $('#supportMessages');
+  box.innerHTML = messages.length ? messages.map(message => `<div class="support-message ${escapeHTML(message.sender)}">${escapeHTML(message.body)}<small>${new Date(message.createdAt).toLocaleString()}</small></div>`).join('') : '<p>有问题可以直接留言，我们会尽快回复。</p>';
+  box.scrollTop = box.scrollHeight;
+}
+$('#supportForm').onsubmit = async event => {
+  event.preventDefault();
+  const body = $('#supportBody').value.trim();
+  if (!body) return;
+  await api('/api/support', {method: 'POST', body: JSON.stringify({body})});
+  $('#supportBody').value = '';
+  await loadSupportMessages();
+};
 
 $('#toggleAuth').onclick = () => {
   state.register = !state.register;

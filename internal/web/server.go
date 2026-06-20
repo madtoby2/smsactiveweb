@@ -35,6 +35,7 @@ type Server struct {
 	EPay     *epay.Client
 }
 type handler func(http.ResponseWriter, *http.Request, store.User)
+type adminHandler func(http.ResponseWriter, *http.Request)
 
 func New(c config.Config, s *store.Store) *Server {
 	if c.AutoReplaceAfter < 2*time.Minute {
@@ -68,6 +69,17 @@ func (s *Server) Routes() http.Handler {
 	m.HandleFunc("POST /api/orders", s.auth(s.purchase))
 	m.HandleFunc("GET /api/orders/{id}", s.auth(s.orderStatus))
 	m.HandleFunc("POST /api/orders/{id}/cancel", s.auth(s.cancel))
+	m.HandleFunc("GET /api/settings", s.publicSettings)
+	m.HandleFunc("GET /api/support", s.auth(s.supportMessages))
+	m.HandleFunc("POST /api/support", s.auth(s.sendSupportMessage))
+	m.HandleFunc("POST /api/admin/login", s.adminLogin)
+	m.HandleFunc("POST /api/admin/logout", s.admin(s.adminLogout))
+	m.HandleFunc("GET /api/admin/overview", s.admin(s.adminOverview))
+	m.HandleFunc("GET /api/admin/settings", s.admin(s.adminSettings))
+	m.HandleFunc("PUT /api/admin/settings", s.admin(s.updateAdminSettings))
+	m.HandleFunc("GET /api/admin/chats", s.admin(s.adminChats))
+	m.HandleFunc("GET /api/admin/chats/{userID}", s.admin(s.adminChatMessages))
+	m.HandleFunc("POST /api/admin/chats/{userID}", s.admin(s.adminSendMessage))
 	m.HandleFunc("GET /sandbox/pay/{id}", s.sandboxPay)
 	m.HandleFunc("POST /sandbox/pay/{id}", s.sandboxComplete)
 	m.HandleFunc("POST /api/payments/yishoumi/notify", s.ysmNotify)

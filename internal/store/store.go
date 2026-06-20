@@ -44,6 +44,38 @@ type Recharge struct {
 	Provider, PayType, Status, ProviderID, Token, Reference string
 	CreatedAt                                               string
 }
+type AdminStats struct {
+	OrdersTotal      int64 `json:"ordersTotal"`
+	OrdersToday      int64 `json:"ordersToday"`
+	OrdersSuccessful int64 `json:"ordersSuccessful"`
+	RevenueFen       int64 `json:"revenueFen"`
+	UsersTotal       int64 `json:"usersTotal"`
+	OpenChats        int64 `json:"openChats"`
+}
+type AdminOrder struct {
+	ID        string `json:"id"`
+	Email     string `json:"email"`
+	Country   string `json:"country"`
+	Service   string `json:"service"`
+	Status    string `json:"status"`
+	Provider  string `json:"provider"`
+	CreatedAt string `json:"createdAt"`
+	PriceFen  int64  `json:"priceFen"`
+}
+type SupportMessage struct {
+	ID        int64  `json:"id"`
+	UserID    int64  `json:"userId"`
+	Sender    string `json:"sender"`
+	Body      string `json:"body"`
+	CreatedAt string `json:"createdAt"`
+}
+type SupportThread struct {
+	UserID      int64  `json:"userId"`
+	Unread      int64  `json:"unread"`
+	Email       string `json:"email"`
+	LastMessage string `json:"lastMessage"`
+	LastAt      string `json:"lastAt"`
+}
 
 const smsOrderSelect = `SELECT id,user_id,COALESCE(upstream_id,''),upstream_provider,COALESCE(upstream_country,''),COALESCE(upstream_service,''),country,service,COALESCE(phone,''),status,COALESCE(code,''),upstream_cost,price_fen,auto_replace,replace_attempts,last_number_at,created_at FROM sms_orders`
 
@@ -107,6 +139,14 @@ CREATE TABLE IF NOT EXISTS ledger(id INTEGER PRIMARY KEY,user_id INTEGER NOT NUL
 		return nil, err
 	}
 	if _, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS recharges_provider_tx_unique ON recharges(provider,provider_id) WHERE provider_id IS NOT NULL AND provider_id <> ''`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err = db.Exec(`
+CREATE TABLE IF NOT EXISTS admin_sessions(token_hash TEXT PRIMARY KEY,expires_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS support_messages(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,sender TEXT NOT NULL CHECK(sender IN ('user','admin')),body TEXT NOT NULL,created_at TEXT NOT NULL,read_at TEXT,FOREIGN KEY(user_id) REFERENCES users(id));
+CREATE INDEX IF NOT EXISTS support_messages_user_id ON support_messages(user_id,id);`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -247,6 +287,35 @@ func (s *Store) DeleteSession(raw string) error {
 	h := sha256.Sum256([]byte(raw))
 	_, e := s.DB.Exec("DELETE FROM sessions WHERE token_hash=?", hex.EncodeToString(h[:]))
 	return e
+}
+
+func (s *Store) CreateAdminSession(raw string) error {
+	h := sha256.Sum256([]byte(raw))
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec("DELETE FROM admin_sessions WHERE expires_at<=?", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		return err
+	}
+	if _, err = tx.Exec("INSERT INTO admin_sessions(token_hash,expires_at) VALUES(?,?)", hex.EncodeToString(h[:]), time.Now().Add(12*time.Hour).UTC().Format(time.RFC3339)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) AdminSessionValid(raw string) bool {
+	h := sha256.Sum256([]byte(raw))
+	var valid int
+	err := s.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM admin_sessions WHERE token_hash=? AND expires_at>?)", hex.EncodeToString(h[:]), time.Now().UTC().Format(time.RFC3339)).Scan(&valid)
+	return err == nil && valid == 1
+}
+
+func (s *Store) DeleteAdminSession(raw string) error {
+	h := sha256.Sum256([]byte(raw))
+	_, err := s.DB.Exec("DELETE FROM admin_sessions WHERE token_hash=?", hex.EncodeToString(h[:]))
+	return err
 }
 
 func (s *Store) CreateSMS(u User, o SMSOrder) error {
@@ -631,4 +700,131 @@ func (s *Store) CreditRecharge(id, providerID string) error {
 		return e
 	}
 	return tx.Commit()
+}
+
+func (s *Store) AdminOverview(today string) (AdminStats, []AdminOrder, error) {
+	var stats AdminStats
+	err := s.DB.QueryRow(`SELECT
+		(SELECT COUNT(*) FROM sms_orders),
+		(SELECT COUNT(*) FROM sms_orders WHERE created_at>=?),
+		(SELECT COUNT(*) FROM sms_orders WHERE status='code_received'),
+		COALESCE((SELECT SUM(amount_fen) FROM recharges WHERE status='paid' AND reference<>''),0),
+		(SELECT COUNT(*) FROM users),
+		(SELECT COUNT(DISTINCT user_id) FROM support_messages WHERE sender='user' AND read_at IS NULL)`, today).
+		Scan(&stats.OrdersTotal, &stats.OrdersToday, &stats.OrdersSuccessful, &stats.RevenueFen, &stats.UsersTotal, &stats.OpenChats)
+	if err != nil {
+		return AdminStats{}, nil, err
+	}
+	rows, err := s.DB.Query(`SELECT o.id,u.email,o.country,o.service,o.status,o.upstream_provider,o.price_fen,o.created_at
+		FROM sms_orders o JOIN users u ON u.id=o.user_id ORDER BY o.created_at DESC LIMIT 50`)
+	if err != nil {
+		return AdminStats{}, nil, err
+	}
+	defer rows.Close()
+	orders := []AdminOrder{}
+	for rows.Next() {
+		var order AdminOrder
+		if err = rows.Scan(&order.ID, &order.Email, &order.Country, &order.Service, &order.Status, &order.Provider, &order.PriceFen, &order.CreatedAt); err != nil {
+			return AdminStats{}, nil, err
+		}
+		orders = append(orders, order)
+	}
+	return stats, orders, rows.Err()
+}
+
+func (s *Store) Settings() (map[string]string, error) {
+	rows, err := s.DB.Query("SELECT key,value FROM settings")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var key, value string
+		if err = rows.Scan(&key, &value); err != nil {
+			return nil, err
+		}
+		out[key] = value
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpdateSettings(values map[string]string) error {
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339)
+	for key, value := range values {
+		if _, err = tx.Exec(`INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, key, value, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) AddSupportMessage(userID int64, sender, body string) (SupportMessage, error) {
+	message := SupportMessage{UserID: userID, Sender: sender, Body: body, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	result, err := s.DB.Exec("INSERT INTO support_messages(user_id,sender,body,created_at) VALUES(?,?,?,?)", userID, sender, body, message.CreatedAt)
+	if err != nil {
+		return SupportMessage{}, err
+	}
+	message.ID, _ = result.LastInsertId()
+	return message, nil
+}
+
+func (s *Store) SupportMessages(userID int64, reader string, limit int) ([]SupportMessage, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := s.DB.Query(`SELECT id,user_id,sender,body,created_at FROM (
+		SELECT id,user_id,sender,body,created_at FROM support_messages WHERE user_id=? ORDER BY id DESC LIMIT ?
+	) ORDER BY id`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	messages := []SupportMessage{}
+	for rows.Next() {
+		var message SupportMessage
+		if err = rows.Scan(&message.ID, &message.UserID, &message.Sender, &message.Body, &message.CreatedAt); err != nil {
+			return nil, err
+		}
+		messages = append(messages, message)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	opposite := "admin"
+	if reader == "admin" {
+		opposite = "user"
+	}
+	_, err = s.DB.Exec("UPDATE support_messages SET read_at=? WHERE user_id=? AND sender=? AND read_at IS NULL", time.Now().UTC().Format(time.RFC3339), userID, opposite)
+	return messages, err
+}
+
+func (s *Store) SupportThreads() ([]SupportThread, error) {
+	rows, err := s.DB.Query(`SELECT u.id,u.email,m.body,m.created_at,
+		(SELECT COUNT(*) FROM support_messages unread WHERE unread.user_id=u.id AND unread.sender='user' AND unread.read_at IS NULL)
+		FROM users u JOIN support_messages m ON m.id=(SELECT MAX(last.id) FROM support_messages last WHERE last.user_id=u.id)
+		ORDER BY m.created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	threads := []SupportThread{}
+	for rows.Next() {
+		var thread SupportThread
+		if err = rows.Scan(&thread.UserID, &thread.Email, &thread.LastMessage, &thread.LastAt, &thread.Unread); err != nil {
+			return nil, err
+		}
+		threads = append(threads, thread)
+	}
+	return threads, rows.Err()
+}
+
+func (s *Store) UserExists(userID int64) bool {
+	var exists int
+	return s.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM users WHERE id=?)", userID).Scan(&exists) == nil && exists == 1
 }

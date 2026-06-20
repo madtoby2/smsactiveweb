@@ -288,3 +288,25 @@ func (c *Client) Reject(ctx context.Context, requestID string) error {
 	}
 	return nil
 }
+
+func (c *Client) Balance(ctx context.Context) (float64, error) {
+	body, err := c.call(ctx, "get-balance", nil)
+	if err != nil {
+		return 0, err
+	}
+	var payload any
+	if err = json.Unmarshal(body, &payload); err != nil {
+		return 0, err
+	}
+	if value, ok := payload.(float64); ok {
+		return value, nil
+	}
+	if record, ok := payload.(map[string]any); ok {
+		for _, key := range []string{"balance", "amount"} {
+			if value := number(record[key]); value != 0 || record[key] != nil {
+				return value, nil
+			}
+		}
+	}
+	return 0, errors.New("SMS-Man returned an invalid balance")
+}

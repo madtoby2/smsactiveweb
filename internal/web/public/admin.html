@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>云码台管理中心</title>
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body>
+  <section id="login" class="login-wrap">
+    <form id="loginForm" class="login-card">
+      <div class="logo">Y</div><h1>管理中心</h1><p>使用管理员账户登录</p>
+      <label>管理员邮箱<input id="email" type="email" autocomplete="username" required></label>
+      <label>密码<input id="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">登录管理中心</button><div id="loginError" class="error"></div>
+    </form>
+  </section>
+  <div id="panel" class="panel hidden">
+    <aside><a class="admin-brand" href="/"><span>Y</span><b>云码台</b><small>管理中心</small></a><nav><button data-view="dashboard" class="active">数据概览</button><button data-view="support">客服聊天 <i id="chatCount"></i></button><button data-view="settings">联系方式</button></nav><button id="logout" class="logout">退出登录</button></aside>
+    <main>
+      <header><div><p>ADMIN CONSOLE</p><h1 id="viewTitle">数据概览</h1></div><button id="refresh" class="secondary">刷新数据</button></header>
+      <section id="dashboard" class="view">
+        <div class="metrics"><article><span>总下单数</span><strong id="ordersTotal">-</strong></article><article><span>今日下单</span><strong id="ordersToday">-</strong></article><article><span>成功接码</span><strong id="ordersSuccessful">-</strong></article><article><span>订单收入</span><strong id="revenue">-</strong></article><article><span>注册用户</span><strong id="usersTotal">-</strong></article></div>
+        <div class="balances"><article><div class="provider hero">H</div><div><span>HeroSMS 余额</span><strong id="heroBalance">读取中</strong><small id="heroError"></small></div></article><article><div class="provider smsman">S</div><div><span>SMS-Man 余额</span><strong id="smsmanBalance">读取中</strong><small id="smsmanError"></small></div></article></div>
+        <article class="card"><div class="card-title"><h2>最近订单</h2><span>最多显示 50 条</span></div><div class="table-wrap"><table><thead><tr><th>订单</th><th>用户</th><th>服务</th><th>渠道</th><th>金额</th><th>状态</th><th>时间</th></tr></thead><tbody id="orders"></tbody></table></div></article>
+      </section>
+      <section id="support" class="view hidden"><div class="chat-layout card"><div class="threads"><div class="card-title"><h2>用户会话</h2></div><div id="threads"></div></div><div class="conversation"><div id="chatHeader" class="chat-header">请选择一位用户</div><div id="messages" class="messages"></div><form id="replyForm" class="reply"><textarea id="reply" maxlength="1000" placeholder="输入回复内容" disabled></textarea><button disabled>发送</button></form></div></div></section>
+      <section id="settings" class="view hidden"><form id="settingsForm" class="settings-card card"><div class="card-title"><div><h2>前台联系方式</h2><span>保存后用户端会立即展示</span></div></div><label>联系方式名称<input id="contactTitle" maxlength="100" placeholder="例如：Telegram 客服"></label><label>联系方式内容<input id="contactValue" maxlength="300" placeholder="例如：@your_service"></label><label>跳转链接<input id="contactURL" maxlength="500" type="url" placeholder="https://t.me/your_service"></label><label>客服时间<input id="supportHours" maxlength="100" placeholder="每日 09:00 - 23:00"></label><button type="submit">保存设置</button><span id="settingsResult"></span></form></section>
+    </main>
+  </div>
+  <div id="toast"></div><script src="/admin.js"></script>
+</body></html>

@@ -66,3 +66,18 @@ func TestCancellationSucceededRequiresExplicitConfirmation(t *testing.T) {
 		}
 	}
 }
+
+func TestBalanceParsesAccessResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("action") != "getBalance" {
+			http.Error(w, "unexpected action", http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte("ACCESS_BALANCE:12.34"))
+	}))
+	defer server.Close()
+	balance, err := New("key", server.URL, "840").Balance(context.Background())
+	if err != nil || balance != 12.34 {
+		t.Fatalf("balance=%v err=%v", balance, err)
+	}
+}

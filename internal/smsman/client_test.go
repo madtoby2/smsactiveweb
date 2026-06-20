@@ -103,3 +103,18 @@ func TestAPIError(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestBalance(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/get-balance" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"balance":456.7}`))
+	}))
+	defer server.Close()
+	balance, err := New("secret", server.URL).Balance(context.Background())
+	if err != nil || balance != 456.7 {
+		t.Fatalf("balance=%v err=%v", balance, err)
+	}
+}

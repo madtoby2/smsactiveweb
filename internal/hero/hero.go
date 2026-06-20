@@ -216,6 +216,29 @@ func (c *Client) SetStatus(ctx context.Context, id, status string) (string, erro
 	return strings.Trim(strings.TrimSpace(string(b)), `"`), e
 }
 
+func (c *Client) Balance(ctx context.Context) (float64, error) {
+	b, err := c.call(ctx, "getBalance", nil)
+	if err != nil {
+		return 0, err
+	}
+	value := strings.Trim(strings.TrimSpace(string(b)), `"`)
+	if parts := strings.SplitN(value, ":", 2); len(parts) == 2 {
+		value = parts[1]
+	}
+	if balance, parseErr := strconv.ParseFloat(value, 64); parseErr == nil {
+		return balance, nil
+	}
+	var payload map[string]any
+	if json.Unmarshal(b, &payload) == nil {
+		for _, key := range []string{"balance", "amount"} {
+			if balance, ok := number(payload[key]); ok {
+				return balance, nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("HeroSMS returned an invalid balance")
+}
+
 // CancellationSucceeded only accepts responses that explicitly confirm the
 // activation was cancelled or refunded. Other ACCESS_* responses represent
 // different lifecycle transitions and must never trigger acquisition of a new

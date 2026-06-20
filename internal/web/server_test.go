@@ -80,6 +80,100 @@ func TestAutoReplaceCancelsThenAcquiresWithoutChargingAgain(t *testing.T) {
 	}
 }
 
+func TestAdminOverviewSettingsAndSupportFlow(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "admin.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, userToken, err := db.Register("customer@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/get-balance" {
+			_, _ = w.Write([]byte(`{"balance":99.5}`))
+			return
+		}
+		if r.URL.Query().Get("action") == "getBalance" {
+			_, _ = w.Write([]byte("ACCESS_BALANCE:7.25"))
+			return
+		}
+		http.Error(w, "unexpected request", http.StatusBadRequest)
+	}))
+	defer upstream.Close()
+	cfg := config.Config{BaseURL: "https://example.test", HeroKey: "hero", HeroURL: upstream.URL, HeroCurrency: "840", SMSManToken: "smsman", SMSManURL: upstream.URL, AdminEmail: "admin@example.com", AdminPassword: "strong-admin-password"}
+	handler := New(cfg, db).Routes()
+
+	userCookie := &http.Cookie{Name: "session", Value: userToken}
+	send := httptest.NewRequest(http.MethodPost, "/api/support", strings.NewReader(`{"body":"Need help"}`))
+	send.Header.Set("content-type", "application/json")
+	send.AddCookie(userCookie)
+	sendResult := httptest.NewRecorder()
+	handler.ServeHTTP(sendResult, send)
+	if sendResult.Code != http.StatusCreated {
+		t.Fatalf("support status=%d body=%s", sendResult.Code, sendResult.Body.String())
+	}
+
+	login := httptest.NewRequest(http.MethodPost, "/api/admin/login", strings.NewReader(`{"Email":"admin@example.com","Password":"strong-admin-password"}`))
+	login.Header.Set("content-type", "application/json")
+	loginResult := httptest.NewRecorder()
+	handler.ServeHTTP(loginResult, login)
+	if loginResult.Code != http.StatusOK {
+		t.Fatalf("login status=%d body=%s", loginResult.Code, loginResult.Body.String())
+	}
+	adminCookie := loginResult.Result().Cookies()[0]
+
+	overview := httptest.NewRequest(http.MethodGet, "/api/admin/overview", nil)
+	overview.AddCookie(adminCookie)
+	overviewResult := httptest.NewRecorder()
+	handler.ServeHTTP(overviewResult, overview)
+	if overviewResult.Code != http.StatusOK || !strings.Contains(overviewResult.Body.String(), `"amount":7.25`) || !strings.Contains(overviewResult.Body.String(), `"amount":99.5`) {
+		t.Fatalf("overview status=%d body=%s", overviewResult.Code, overviewResult.Body.String())
+	}
+
+	chats := httptest.NewRequest(http.MethodGet, "/api/admin/chats", nil)
+	chats.AddCookie(adminCookie)
+	chatsResult := httptest.NewRecorder()
+	handler.ServeHTTP(chatsResult, chats)
+	if chatsResult.Code != http.StatusOK || !strings.Contains(chatsResult.Body.String(), "customer@example.com") {
+		t.Fatalf("chats=%s", chatsResult.Body.String())
+	}
+
+	reply := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/admin/chats/%d", user.ID), strings.NewReader(`{"body":"We are here"}`))
+	reply.Header.Set("content-type", "application/json")
+	reply.AddCookie(adminCookie)
+	replyResult := httptest.NewRecorder()
+	handler.ServeHTTP(replyResult, reply)
+	if replyResult.Code != http.StatusCreated {
+		t.Fatalf("reply status=%d body=%s", replyResult.Code, replyResult.Body.String())
+	}
+
+	settings := httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(`{"contactTitle":"Telegram","contactValue":"@cloudsms","contactURL":"https://t.me/cloudsms","supportHours":"24/7"}`))
+	settings.Header.Set("content-type", "application/json")
+	settings.AddCookie(adminCookie)
+	settingsResult := httptest.NewRecorder()
+	handler.ServeHTTP(settingsResult, settings)
+	if settingsResult.Code != http.StatusOK {
+		t.Fatalf("settings status=%d body=%s", settingsResult.Code, settingsResult.Body.String())
+	}
+
+	public := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	publicResult := httptest.NewRecorder()
+	handler.ServeHTTP(publicResult, public)
+	if publicResult.Code != http.StatusOK || !strings.Contains(publicResult.Body.String(), "@cloudsms") {
+		t.Fatalf("public settings=%s", publicResult.Body.String())
+	}
+
+	messages := httptest.NewRequest(http.MethodGet, "/api/support", nil)
+	messages.AddCookie(userCookie)
+	messagesResult := httptest.NewRecorder()
+	handler.ServeHTTP(messagesResult, messages)
+	if messagesResult.Code != http.StatusOK || !strings.Contains(messagesResult.Body.String(), "We are here") {
+		t.Fatalf("messages=%s", messagesResult.Body.String())
+	}
+}
+
 func TestAutoReplaceDoesNotAcquireWithoutCancellationConfirmation(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "cancel-confirmation.db"))
 	if err != nil {

@@ -19,6 +19,7 @@
   <link rel="stylesheet" href="/auth.css">
   <link rel="stylesheet" href="/service.css">
   <link rel="stylesheet" href="/footer.css">
+  <link rel="stylesheet" href="/support.css">
 </head>
 <body>
   <div class="glow one"></div><div class="glow two"></div>
@@ -47,5 +48,12 @@
   </footer>
 
   <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"云码台","url":"https://35-212-227-118.sslip.io/","description":"全球短信验证码接收平台，聚合多家号码供应商。","inLanguage":"zh-CN"}</script>
+  <button id="supportOpen" class="support-open hidden" type="button">联系客服</button>
+  <aside id="supportPanel" class="support-panel hidden" aria-label="客服聊天">
+    <header><div><strong id="supportTitle">在线客服</strong><small id="supportHours"></small></div><button id="supportClose" type="button" aria-label="关闭">×</button></header>
+    <a id="contactLink" class="contact-line hidden" target="_blank" rel="noopener noreferrer"></a>
+    <div id="supportMessages" class="support-messages"><p>有问题可以直接留言，我们会尽快回复。</p></div>
+    <form id="supportForm"><textarea id="supportBody" maxlength="1000" placeholder="请输入您的问题" required></textarea><button type="submit">发送</button></form>
+  </aside>
   <div id="toast"></div><script src="/service-icons.js"></script><script src="/app.js"></script>
 </body></html>
