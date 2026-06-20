@@ -83,7 +83,7 @@ function showApp(data) {
   $('#logout').classList.remove('hidden');
   if (!state.liveSmsPurchaseEnabled) {
     $('#buy').textContent = '支付取号演示模式';
-    $('#stock').textContent = '沙箱配置禁止消耗真实 HeroSMS 余额';
+    $('#stock').textContent = '演示环境暂不分配真实号码';
   }
 }
 
@@ -136,7 +136,7 @@ function selectOffer() {
   const offer = state.offers.find(item => item.service === state.selectedService);
   $('#buy').disabled = !offer || !state.liveSmsPurchaseEnabled;
   $('#price').textContent = offer ? money(offer.priceFen) : '请选择服务';
-  $('#stock').textContent = offer ? (state.liveSmsPurchaseEnabled ? `实时库存 ${offer.count} 个 · 已含 ¥1 服务费` : `实时库存 ${offer.count} 个 · 沙箱禁止真实取号`) : '';
+  $('#stock').textContent = offer ? (state.liveSmsPurchaseEnabled ? `实时库存 ${offer.count} 个` : `实时库存 ${offer.count} 个 · 演示环境`) : '';
 }
 
 $('#buy').onclick = async () => {

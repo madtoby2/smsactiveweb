@@ -1,0 +1,17 @@
+.trust {
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.trust b.alipay::before {
+  content: "支";
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  margin-right: 7px;
+  border-radius: 5px;
+  color: #fff;
+  background: #1677ff;
+  font-size: 11px;
+}
