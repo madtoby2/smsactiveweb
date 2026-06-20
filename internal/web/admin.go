@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -13,10 +14,29 @@ import (
 )
 
 var settingKeys = map[string]bool{
-	"contactTitle": true,
-	"contactValue": true,
-	"contactURL":   true,
-	"supportHours": true,
+	"contactTitle":  true,
+	"contactValue":  true,
+	"contactURL":    true,
+	"supportHours":  true,
+	"markupCNY":     true,
+	"usdCnyRate":    true,
+	"smsmanCnyRate": true,
+}
+
+type livePricing struct{ Markup, USDCNY, SMSManCNY float64 }
+
+func (s *Server) effectivePricing() livePricing {
+	pricing := livePricing{Markup: s.C.Markup, USDCNY: s.C.USDCNY, SMSManCNY: s.C.SMSManCNYRate}
+	values, err := s.Store.Settings()
+	if err != nil {
+		return pricing
+	}
+	for key, target := range map[string]*float64{"markupCNY": &pricing.Markup, "usdCnyRate": &pricing.USDCNY, "smsmanCnyRate": &pricing.SMSManCNY} {
+		if value, parseErr := strconv.ParseFloat(values[key], 64); parseErr == nil && value > 0 {
+			*target = value
+		}
+	}
+	return pricing
 }
 
 func (s *Server) admin(next adminHandler) http.HandlerFunc {
@@ -55,6 +75,7 @@ func (s *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
+	s.Store.Audit("admin.login", s.C.AdminEmail, r.RemoteAddr)
 	http.SetCookie(w, &http.Cookie{Name: "admin_session", Value: raw, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: strings.HasPrefix(s.C.BaseURL, "https://"), MaxAge: 12 * 60 * 60})
 	jsonOut(w, http.StatusOK, map[string]string{"email": s.C.AdminEmail})
 }
@@ -102,8 +123,10 @@ func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
 
 func defaultSettings(values map[string]string) map[string]string {
 	defaults := map[string]string{"contactTitle": "在线客服", "contactValue": "请通过客服聊天联系我们", "contactURL": "", "supportHours": "每日 09:00 - 23:00"}
-	for key, value := range values {
-		defaults[key] = value
+	for key := range settingKeys {
+		if value, exists := values[key]; exists && (key == "contactTitle" || key == "contactValue" || key == "contactURL" || key == "supportHours") {
+			defaults[key] = value
+		}
 	}
 	return defaults
 }
@@ -118,7 +141,17 @@ func (s *Server) publicSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
-	s.publicSettings(w, r)
+	values, err := s.Store.Settings()
+	if err != nil {
+		fail(w, 500, err)
+		return
+	}
+	out := defaultSettings(values)
+	pricing := s.effectivePricing()
+	out["markupCNY"] = strconv.FormatFloat(pricing.Markup, 'f', -1, 64)
+	out["usdCnyRate"] = strconv.FormatFloat(pricing.USDCNY, 'f', -1, 64)
+	out["smsmanCnyRate"] = strconv.FormatFloat(pricing.SMSManCNY, 'f', -1, 64)
+	jsonOut(w, 200, out)
 }
 
 func (s *Server) updateAdminSettings(w http.ResponseWriter, r *http.Request) {
@@ -145,13 +178,30 @@ func (s *Server) updateAdminSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if key == "markupCNY" || key == "usdCnyRate" || key == "smsmanCnyRate" {
+			number, err := strconv.ParseFloat(value, 64)
+			if err != nil || number <= 0 || number > 1000 {
+				fail(w, 400, key+" must be between 0 and 1000")
+				return
+			}
+		}
 		clean[key] = value
 	}
 	if err := s.Store.UpdateSettings(clean); err != nil {
 		fail(w, 500, err)
 		return
 	}
+	s.Store.Audit("settings.update", "settings", strings.Join(sortedKeys(clean), ","))
 	s.adminSettings(w, r)
+}
+
+func sortedKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func messageBody(r *http.Request) (string, error) {
@@ -237,5 +287,132 @@ func (s *Server) adminSendMessage(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, err)
 		return
 	}
+	s.Store.Audit("support.reply", strconv.FormatInt(userID, 10), "")
 	jsonOut(w, 201, message)
+}
+
+func (s *Server) publicAnnouncements(w http.ResponseWriter, r *http.Request) {
+	items, err := s.Store.Announcements(true)
+	if err != nil {
+		fail(w, 500, err)
+		return
+	}
+	jsonOut(w, 200, items)
+}
+
+func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request) {
+	users, err := s.Store.AdminUsers(r.URL.Query().Get("q"))
+	if err != nil {
+		fail(w, 500, err)
+		return
+	}
+	jsonOut(w, 200, users)
+}
+
+func (s *Server) adminUpdateUser(w http.ResponseWriter, r *http.Request) {
+	userID, ok := s.chatUserID(w, r)
+	if !ok {
+		return
+	}
+	var input struct {
+		Disabled bool `json:"disabled"`
+	}
+	if decode(r, &input) != nil {
+		fail(w, 400, "invalid user update")
+		return
+	}
+	if err := s.Store.SetUserDisabled(userID, input.Disabled); err != nil {
+		fail(w, 500, err)
+		return
+	}
+	s.Store.Audit("user.status", strconv.FormatInt(userID, 10), strconv.FormatBool(input.Disabled))
+	jsonOut(w, 200, map[string]any{"id": userID, "disabled": input.Disabled})
+}
+
+func (s *Server) adminOrders(w http.ResponseWriter, r *http.Request) {
+	orders, err := s.Store.AdminOrders(r.URL.Query().Get("q"), r.URL.Query().Get("status"))
+	if err != nil {
+		fail(w, 500, err)
+		return
+	}
+	jsonOut(w, 200, orders)
+}
+
+func (s *Server) adminPayments(w http.ResponseWriter, r *http.Request) {
+	payments, err := s.Store.AdminPayments(r.URL.Query().Get("q"), r.URL.Query().Get("status"))
+	if err != nil {
+		fail(w, 500, err)
+		return
+	}
+	jsonOut(w, 200, payments)
+}
+
+func (s *Server) adminAnnouncements(w http.ResponseWriter, r *http.Request) {
+	items, err := s.Store.Announcements(false)
+	if err != nil {
+		fail(w, 500, err)
+		return
+	}
+	jsonOut(w, 200, items)
+}
+
+func (s *Server) adminSaveAnnouncement(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Title  string `json:"title"`
+		Body   string `json:"body"`
+		Active bool   `json:"active"`
+	}
+	if decode(r, &input) != nil {
+		fail(w, 400, "invalid announcement")
+		return
+	}
+	input.Title = strings.TrimSpace(input.Title)
+	input.Body = strings.TrimSpace(input.Body)
+	if input.Title == "" || len([]rune(input.Title)) > 100 || input.Body == "" || len([]rune(input.Body)) > 5000 {
+		fail(w, 400, "announcement title or body is invalid")
+		return
+	}
+	item := store.Announcement{Title: input.Title, Body: input.Body, Active: input.Active}
+	if rawID := r.PathValue("id"); rawID != "" {
+		id, err := strconv.ParseInt(rawID, 10, 64)
+		if err != nil {
+			fail(w, 400, "invalid announcement id")
+			return
+		}
+		item.ID = id
+	}
+	saved, err := s.Store.SaveAnnouncement(item)
+	if err != nil {
+		fail(w, 500, err)
+		return
+	}
+	s.Store.Audit("announcement.save", strconv.FormatInt(saved.ID, 10), saved.Title)
+	status := 200
+	if item.ID == 0 {
+		status = 201
+	}
+	jsonOut(w, status, saved)
+}
+
+func (s *Server) adminDeleteAnnouncement(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		fail(w, 400, "invalid announcement id")
+		return
+	}
+	if err = s.Store.DeleteAnnouncement(id); err != nil {
+		fail(w, 404, "announcement not found")
+		return
+	}
+	s.Store.Audit("announcement.delete", strconv.FormatInt(id, 10), "")
+	jsonOut(w, 200, map[string]bool{"ok": true})
+}
+
+func (s *Server) adminAudit(w http.ResponseWriter, r *http.Request) {
+	events, err := s.Store.AuditEvents()
+	if err != nil {
+		fail(w, 500, err)
+		return
+	}
+	jsonOut(w, 200, events)
 }

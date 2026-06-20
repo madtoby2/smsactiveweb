@@ -62,6 +62,7 @@ function generatedServiceIcon(code, name = '') {
 }
 
 async function boot() {
+  loadAnnouncements().catch(() => {});
   try {
     const me = await api('/api/me');
     showApp(me);
@@ -74,6 +75,16 @@ async function boot() {
   } catch {
     $('#auth').classList.remove('hidden');
   }
+}
+
+async function loadAnnouncements() {
+  const items = await api('/api/announcements');
+  const banner = $('#announcementBanner');
+  if (!items.length) return;
+  const item = items[0];
+  banner.innerHTML = `<button type="button" aria-label="关闭公告">×</button><b>${escapeHTML(item.title)}</b><span>${escapeHTML(item.body)}</span>`;
+  banner.classList.remove('hidden');
+  banner.querySelector('button').onclick = () => banner.classList.add('hidden');
 }
 
 function showApp(data) {

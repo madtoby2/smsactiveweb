@@ -15,9 +15,10 @@ import (
 
 type Store struct{ DB *sql.DB }
 type User struct {
-	ID      int64  `json:"id"`
-	Email   string `json:"email"`
-	Balance int64  `json:"balanceFen"`
+	ID       int64  `json:"id"`
+	Email    string `json:"email"`
+	Balance  int64  `json:"balanceFen"`
+	Disabled bool   `json:"disabled,omitempty"`
 }
 type SMSOrder struct {
 	ID               string `json:"id"`
@@ -76,6 +77,41 @@ type SupportThread struct {
 	LastMessage string `json:"lastMessage"`
 	LastAt      string `json:"lastAt"`
 }
+type AdminUser struct {
+	ID         int64  `json:"id"`
+	Email      string `json:"email"`
+	BalanceFen int64  `json:"balanceFen"`
+	Disabled   bool   `json:"disabled"`
+	Orders     int64  `json:"orders"`
+	SpentFen   int64  `json:"spentFen"`
+	CreatedAt  string `json:"createdAt"`
+}
+type AdminPayment struct {
+	ID         string `json:"id"`
+	Email      string `json:"email"`
+	Provider   string `json:"provider"`
+	PayType    string `json:"payType"`
+	Status     string `json:"status"`
+	ProviderID string `json:"providerId"`
+	OrderID    string `json:"orderId"`
+	CreatedAt  string `json:"createdAt"`
+	AmountFen  int64  `json:"amountFen"`
+}
+type Announcement struct {
+	ID        int64  `json:"id"`
+	Title     string `json:"title"`
+	Body      string `json:"body"`
+	CreatedAt string `json:"createdAt"`
+	UpdatedAt string `json:"updatedAt"`
+	Active    bool   `json:"active"`
+}
+type AuditEvent struct {
+	ID     int64  `json:"id"`
+	Action string `json:"action"`
+	Target string `json:"target"`
+	Detail string `json:"detail"`
+	At     string `json:"at"`
+}
 
 const smsOrderSelect = `SELECT id,user_id,COALESCE(upstream_id,''),upstream_provider,COALESCE(upstream_country,''),COALESCE(upstream_service,''),country,service,COALESCE(phone,''),status,COALESCE(code,''),upstream_cost,price_fen,auto_replace,replace_attempts,last_number_at,created_at FROM sms_orders`
 
@@ -124,6 +160,7 @@ CREATE TABLE IF NOT EXISTS ledger(id INTEGER PRIMARY KEY,user_id INTEGER NOT NUL
 		"ALTER TABLE recharges ADD COLUMN reference TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE sms_orders ADD COLUMN upstream_country TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE sms_orders ADD COLUMN upstream_service TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0",
 	} {
 		if _, e := db.Exec(migration); e != nil && !strings.Contains(strings.ToLower(e.Error()), "duplicate column") {
 			db.Close()
@@ -146,7 +183,9 @@ CREATE TABLE IF NOT EXISTS ledger(id INTEGER PRIMARY KEY,user_id INTEGER NOT NUL
 CREATE TABLE IF NOT EXISTS admin_sessions(token_hash TEXT PRIMARY KEY,expires_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS support_messages(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,sender TEXT NOT NULL CHECK(sender IN ('user','admin')),body TEXT NOT NULL,created_at TEXT NOT NULL,read_at TEXT,FOREIGN KEY(user_id) REFERENCES users(id));
-CREATE INDEX IF NOT EXISTS support_messages_user_id ON support_messages(user_id,id);`); err != nil {
+CREATE INDEX IF NOT EXISTS support_messages_user_id ON support_messages(user_id,id);
+CREATE TABLE IF NOT EXISTS announcements(id INTEGER PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY,action TEXT NOT NULL,target TEXT NOT NULL DEFAULT '',detail TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL);`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -259,13 +298,13 @@ func (s *Store) Register(email, password string) (User, string, error) {
 	id, _ := r.LastInsertId()
 	token, th := Token()
 	_, e = s.DB.Exec("INSERT INTO sessions VALUES(?,?,?)", th, id, time.Now().Add(sessionLifetime).UTC().Format(time.RFC3339))
-	return User{id, email, 0}, token, e
+	return User{ID: id, Email: email}, token, e
 }
 func (s *Store) Login(email, password string) (User, string, error) {
 	var u User
 	var hash string
-	e := s.DB.QueryRow("SELECT id,email,balance_fen,password_hash FROM users WHERE email=?", email).Scan(&u.ID, &u.Email, &u.Balance, &hash)
-	if e != nil || !VerifyPassword(hash, password) {
+	e := s.DB.QueryRow("SELECT id,email,balance_fen,password_hash,disabled FROM users WHERE email=?", email).Scan(&u.ID, &u.Email, &u.Balance, &hash, &u.Disabled)
+	if e != nil || u.Disabled || !VerifyPassword(hash, password) {
 		return User{}, "", errors.New("邮箱或密码错误")
 	}
 	token, th := Token()
@@ -275,7 +314,7 @@ func (s *Store) Login(email, password string) (User, string, error) {
 func (s *Store) UserByToken(raw string) (User, error) {
 	h := sha256.Sum256([]byte(raw))
 	var u User
-	e := s.DB.QueryRow(`SELECT u.id,u.email,u.balance_fen FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?`, hex.EncodeToString(h[:]), time.Now().UTC().Format(time.RFC3339)).Scan(&u.ID, &u.Email, &u.Balance)
+	e := s.DB.QueryRow(`SELECT u.id,u.email,u.balance_fen,u.disabled FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? AND u.disabled=0`, hex.EncodeToString(h[:]), time.Now().UTC().Format(time.RFC3339)).Scan(&u.ID, &u.Email, &u.Balance, &u.Disabled)
 	return u, e
 }
 func (s *Store) TouchSession(raw string) error {
@@ -827,4 +866,162 @@ func (s *Store) SupportThreads() ([]SupportThread, error) {
 func (s *Store) UserExists(userID int64) bool {
 	var exists int
 	return s.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM users WHERE id=?)", userID).Scan(&exists) == nil && exists == 1
+}
+
+func (s *Store) AdminUsers(query string) ([]AdminUser, error) {
+	like := "%" + strings.TrimSpace(query) + "%"
+	rows, err := s.DB.Query(`SELECT u.id,u.email,u.balance_fen,u.disabled,
+		(SELECT COUNT(*) FROM sms_orders o WHERE o.user_id=u.id),
+		COALESCE((SELECT SUM(r.amount_fen) FROM recharges r WHERE r.user_id=u.id AND r.status='paid' AND r.reference<>''),0),u.created_at
+		FROM users u WHERE ?='' OR u.email LIKE ? ORDER BY u.created_at DESC LIMIT 200`, strings.TrimSpace(query), like)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	users := []AdminUser{}
+	for rows.Next() {
+		var user AdminUser
+		if err = rows.Scan(&user.ID, &user.Email, &user.BalanceFen, &user.Disabled, &user.Orders, &user.SpentFen, &user.CreatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, user)
+	}
+	return users, rows.Err()
+}
+
+func (s *Store) SetUserDisabled(userID int64, disabled bool) error {
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec("UPDATE users SET disabled=? WHERE id=?", disabled, userID)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return sql.ErrNoRows
+	}
+	if disabled {
+		if _, err = tx.Exec("DELETE FROM sessions WHERE user_id=?", userID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) AdminOrders(query, status string) ([]AdminOrder, error) {
+	query = strings.TrimSpace(query)
+	like := "%" + query + "%"
+	rows, err := s.DB.Query(`SELECT o.id,u.email,o.country,o.service,o.status,o.upstream_provider,o.price_fen,o.created_at
+		FROM sms_orders o JOIN users u ON u.id=o.user_id
+		WHERE (?='' OR o.id LIKE ? OR u.email LIKE ? OR o.phone LIKE ?) AND (?='' OR o.status=?)
+		ORDER BY o.created_at DESC LIMIT 200`, query, like, like, like, status, status)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	orders := []AdminOrder{}
+	for rows.Next() {
+		var order AdminOrder
+		if err = rows.Scan(&order.ID, &order.Email, &order.Country, &order.Service, &order.Status, &order.Provider, &order.PriceFen, &order.CreatedAt); err != nil {
+			return nil, err
+		}
+		orders = append(orders, order)
+	}
+	return orders, rows.Err()
+}
+
+func (s *Store) AdminPayments(query, status string) ([]AdminPayment, error) {
+	query = strings.TrimSpace(query)
+	like := "%" + query + "%"
+	rows, err := s.DB.Query(`SELECT r.id,u.email,r.provider,r.pay_type,r.status,COALESCE(r.provider_id,''),r.reference,r.amount_fen,r.created_at
+		FROM recharges r JOIN users u ON u.id=r.user_id
+		WHERE (?='' OR r.id LIKE ? OR u.email LIKE ? OR r.provider_id LIKE ? OR r.reference LIKE ?) AND (?='' OR r.status=?)
+		ORDER BY r.created_at DESC LIMIT 200`, query, like, like, like, like, status, status)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	payments := []AdminPayment{}
+	for rows.Next() {
+		var payment AdminPayment
+		if err = rows.Scan(&payment.ID, &payment.Email, &payment.Provider, &payment.PayType, &payment.Status, &payment.ProviderID, &payment.OrderID, &payment.AmountFen, &payment.CreatedAt); err != nil {
+			return nil, err
+		}
+		payments = append(payments, payment)
+	}
+	return payments, rows.Err()
+}
+
+func (s *Store) Announcements(activeOnly bool) ([]Announcement, error) {
+	rows, err := s.DB.Query(`SELECT id,title,body,active,created_at,updated_at FROM announcements WHERE ?=0 OR active=1 ORDER BY id DESC LIMIT 100`, activeOnly)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Announcement{}
+	for rows.Next() {
+		var item Announcement
+		if err = rows.Scan(&item.ID, &item.Title, &item.Body, &item.Active, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) SaveAnnouncement(item Announcement) (Announcement, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	if item.ID == 0 {
+		result, err := s.DB.Exec("INSERT INTO announcements(title,body,active,created_at,updated_at) VALUES(?,?,?,?,?)", item.Title, item.Body, item.Active, now, now)
+		if err != nil {
+			return Announcement{}, err
+		}
+		item.ID, _ = result.LastInsertId()
+		item.CreatedAt = now
+		item.UpdatedAt = now
+		return item, nil
+	}
+	result, err := s.DB.Exec("UPDATE announcements SET title=?,body=?,active=?,updated_at=? WHERE id=?", item.Title, item.Body, item.Active, now, item.ID)
+	if err != nil {
+		return Announcement{}, err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return Announcement{}, sql.ErrNoRows
+	}
+	item.UpdatedAt = now
+	return item, nil
+}
+
+func (s *Store) DeleteAnnouncement(id int64) error {
+	result, err := s.DB.Exec("DELETE FROM announcements WHERE id=?", id)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) Audit(action, target, detail string) {
+	_, _ = s.DB.Exec("INSERT INTO admin_audit(action,target,detail,created_at) VALUES(?,?,?,?)", action, target, detail, time.Now().UTC().Format(time.RFC3339))
+}
+
+func (s *Store) AuditEvents() ([]AuditEvent, error) {
+	rows, err := s.DB.Query("SELECT id,action,target,detail,created_at FROM admin_audit ORDER BY id DESC LIMIT 200")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	events := []AuditEvent{}
+	for rows.Next() {
+		var event AuditEvent
+		if err = rows.Scan(&event.ID, &event.Action, &event.Target, &event.Detail, &event.At); err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
 }

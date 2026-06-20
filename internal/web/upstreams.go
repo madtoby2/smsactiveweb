@@ -86,6 +86,7 @@ func (c *smsmanCatalogCache) countryQuotes(ctx context.Context, client *smsman.C
 
 func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapshot, error) {
 	snapshot := catalogSnapshot{Quotes: map[string]providerQuote{}}
+	livePricing := s.effectivePricing()
 	var heroErr error
 	if s.C.HeroKey != "" {
 		snapshot.Countries, heroErr = s.Hero.Countries(ctx)
@@ -98,7 +99,7 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 			if heroErr == nil {
 				for _, offer := range offers {
 					if offer.Count > 0 {
-						snapshot.Quotes[offer.Service] = providerQuote{Service: offer.Service, Provider: "hero", ProviderCountry: country, ProviderService: offer.Service, Cost: offer.Cost, Rate: s.C.USDCNY, Count: offer.Count}
+						snapshot.Quotes[offer.Service] = providerQuote{Service: offer.Service, Provider: "hero", ProviderCountry: country, ProviderService: offer.Service, Cost: offer.Cost, Rate: livePricing.USDCNY, Count: offer.Count}
 					}
 				}
 			}
@@ -172,9 +173,9 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 		if !ok || quote.Count <= 0 {
 			continue
 		}
-		candidate := providerQuote{Service: service.Code, Provider: "smsman", ProviderCountry: strconv.Itoa(smsCountryID), ProviderService: strconv.Itoa(applicationID), Cost: quote.Price, Rate: s.C.SMSManCNYRate, Count: quote.Count}
+		candidate := providerQuote{Service: service.Code, Provider: "smsman", ProviderCountry: strconv.Itoa(smsCountryID), ProviderService: strconv.Itoa(applicationID), Cost: quote.Price, Rate: livePricing.SMSManCNY, Count: quote.Count}
 		current, exists := snapshot.Quotes[service.Code]
-		if !exists || candidate.priceFen(s.C.Markup) < current.priceFen(s.C.Markup) {
+		if !exists || candidate.priceFen(livePricing.Markup) < current.priceFen(livePricing.Markup) {
 			snapshot.Quotes[service.Code] = candidate
 		}
 	}

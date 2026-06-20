@@ -70,6 +70,7 @@ func (s *Server) Routes() http.Handler {
 	m.HandleFunc("GET /api/orders/{id}", s.auth(s.orderStatus))
 	m.HandleFunc("POST /api/orders/{id}/cancel", s.auth(s.cancel))
 	m.HandleFunc("GET /api/settings", s.publicSettings)
+	m.HandleFunc("GET /api/announcements", s.publicAnnouncements)
 	m.HandleFunc("GET /api/support", s.auth(s.supportMessages))
 	m.HandleFunc("POST /api/support", s.auth(s.sendSupportMessage))
 	m.HandleFunc("POST /api/admin/login", s.adminLogin)
@@ -80,6 +81,15 @@ func (s *Server) Routes() http.Handler {
 	m.HandleFunc("GET /api/admin/chats", s.admin(s.adminChats))
 	m.HandleFunc("GET /api/admin/chats/{userID}", s.admin(s.adminChatMessages))
 	m.HandleFunc("POST /api/admin/chats/{userID}", s.admin(s.adminSendMessage))
+	m.HandleFunc("GET /api/admin/users", s.admin(s.adminUsers))
+	m.HandleFunc("PATCH /api/admin/users/{userID}", s.admin(s.adminUpdateUser))
+	m.HandleFunc("GET /api/admin/orders", s.admin(s.adminOrders))
+	m.HandleFunc("GET /api/admin/payments", s.admin(s.adminPayments))
+	m.HandleFunc("GET /api/admin/announcements", s.admin(s.adminAnnouncements))
+	m.HandleFunc("POST /api/admin/announcements", s.admin(s.adminSaveAnnouncement))
+	m.HandleFunc("PUT /api/admin/announcements/{id}", s.admin(s.adminSaveAnnouncement))
+	m.HandleFunc("DELETE /api/admin/announcements/{id}", s.admin(s.adminDeleteAnnouncement))
+	m.HandleFunc("GET /api/admin/audit", s.admin(s.adminAudit))
 	m.HandleFunc("GET /sandbox/pay/{id}", s.sandboxPay)
 	m.HandleFunc("POST /sandbox/pay/{id}", s.sandboxComplete)
 	m.HandleFunc("POST /api/payments/yishoumi/notify", s.ysmNotify)
@@ -179,7 +189,8 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) me(w http.ResponseWriter, r *http.Request, u store.User) {
 	liveSMSPurchaseEnabled := s.C.PayProvider != "sandbox" || s.C.AllowLiveSMSInSandbox
-	jsonOut(w, 200, map[string]any{"user": u, "pricing": map[string]any{"markupCNY": s.C.Markup, "usdCnyRate": s.C.USDCNY}, "paymentProvider": s.C.PayProvider, "liveSmsPurchaseEnabled": liveSMSPurchaseEnabled, "autoReplaceMax": s.C.AutoReplaceMax})
+	pricing := s.effectivePricing()
+	jsonOut(w, 200, map[string]any{"user": u, "pricing": map[string]any{"markupCNY": pricing.Markup, "usdCnyRate": pricing.USDCNY}, "paymentProvider": s.C.PayProvider, "liveSmsPurchaseEnabled": liveSMSPurchaseEnabled, "autoReplaceMax": s.C.AutoReplaceMax})
 }
 
 func (s *Server) catalog(w http.ResponseWriter, r *http.Request, u store.User) {
@@ -199,8 +210,9 @@ func (s *Server) catalog(w http.ResponseWriter, r *http.Request, u store.User) {
 		PriceFen int64  `json:"priceFen"`
 	}
 	po := make([]priced, 0, len(snapshot.Quotes))
+	markup := s.effectivePricing().Markup
 	for _, quote := range snapshot.Quotes {
-		po = append(po, priced{Service: quote.Service, Count: quote.Count, PriceFen: quote.priceFen(s.C.Markup)})
+		po = append(po, priced{Service: quote.Service, Count: quote.Count, PriceFen: quote.priceFen(markup)})
 	}
 	jsonOut(w, 200, map[string]any{"countries": snapshot.Countries, "services": snapshot.Services, "offers": po})
 }
@@ -243,7 +255,7 @@ func (s *Server) purchase(w http.ResponseWriter, r *http.Request, u store.User) 
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	o := store.SMSOrder{ID: store.ID("S"), UserID: u.ID, UpstreamProvider: quote.Provider, UpstreamCountry: quote.ProviderCountry, UpstreamService: quote.ProviderService, Country: in.Country, Service: in.Service, UpstreamCost: quote.Cost, PriceFen: quote.priceFen(s.C.Markup), AutoReplace: true, CreatedAt: now}
+	o := store.SMSOrder{ID: store.ID("S"), UserID: u.ID, UpstreamProvider: quote.Provider, UpstreamCountry: quote.ProviderCountry, UpstreamService: quote.ProviderService, Country: in.Country, Service: in.Service, UpstreamCost: quote.Cost, PriceFen: quote.priceFen(s.effectivePricing().Markup), AutoReplace: true, CreatedAt: now}
 	raw, _ := store.Token()
 	payment := store.Recharge{ID: store.ID("P"), UserID: u.ID, AmountFen: o.PriceFen, Provider: s.C.PayProvider, PayType: strconv.Itoa(in.PayType), Token: raw, Reference: o.ID, CreatedAt: now}
 	if e = s.Store.CreateSMSPayment(u, o, payment); e != nil {

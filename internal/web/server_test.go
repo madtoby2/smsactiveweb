@@ -172,6 +172,63 @@ func TestAdminOverviewSettingsAndSupportFlow(t *testing.T) {
 	if messagesResult.Code != http.StatusOK || !strings.Contains(messagesResult.Body.String(), "We are here") {
 		t.Fatalf("messages=%s", messagesResult.Body.String())
 	}
+
+	pricingUpdate := httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(`{"markupCNY":"2.5","usdCnyRate":"7.4","smsmanCnyRate":"0.09"}`))
+	pricingUpdate.Header.Set("content-type", "application/json")
+	pricingUpdate.AddCookie(adminCookie)
+	pricingResult := httptest.NewRecorder()
+	handler.ServeHTTP(pricingResult, pricingUpdate)
+	if pricingResult.Code != http.StatusOK || !strings.Contains(pricingResult.Body.String(), `"markupCNY":"2.5"`) {
+		t.Fatalf("pricing settings status=%d body=%s", pricingResult.Code, pricingResult.Body.String())
+	}
+
+	createAnnouncement := httptest.NewRequest(http.MethodPost, "/api/admin/announcements", strings.NewReader(`{"title":"Maintenance","body":"Tonight at 23:00","active":true}`))
+	createAnnouncement.Header.Set("content-type", "application/json")
+	createAnnouncement.AddCookie(adminCookie)
+	announcementResult := httptest.NewRecorder()
+	handler.ServeHTTP(announcementResult, createAnnouncement)
+	if announcementResult.Code != http.StatusCreated {
+		t.Fatalf("announcement status=%d body=%s", announcementResult.Code, announcementResult.Body.String())
+	}
+	publicAnnouncements := httptest.NewRequest(http.MethodGet, "/api/announcements", nil)
+	publicAnnouncementsResult := httptest.NewRecorder()
+	handler.ServeHTTP(publicAnnouncementsResult, publicAnnouncements)
+	if publicAnnouncementsResult.Code != http.StatusOK || !strings.Contains(publicAnnouncementsResult.Body.String(), "Maintenance") {
+		t.Fatalf("public announcements=%s", publicAnnouncementsResult.Body.String())
+	}
+
+	users := httptest.NewRequest(http.MethodGet, "/api/admin/users?q=customer", nil)
+	users.AddCookie(adminCookie)
+	usersResult := httptest.NewRecorder()
+	handler.ServeHTTP(usersResult, users)
+	if usersResult.Code != http.StatusOK || !strings.Contains(usersResult.Body.String(), "customer@example.com") {
+		t.Fatalf("users=%s", usersResult.Body.String())
+	}
+	disable := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/admin/users/%d", user.ID), strings.NewReader(`{"disabled":true}`))
+	disable.Header.Set("content-type", "application/json")
+	disable.AddCookie(adminCookie)
+	disableResult := httptest.NewRecorder()
+	handler.ServeHTTP(disableResult, disable)
+	if disableResult.Code != http.StatusOK {
+		t.Fatalf("disable status=%d body=%s", disableResult.Code, disableResult.Body.String())
+	}
+	disabledRequest := httptest.NewRequest(http.MethodGet, "/api/support", nil)
+	disabledRequest.AddCookie(userCookie)
+	disabledResult := httptest.NewRecorder()
+	handler.ServeHTTP(disabledResult, disabledRequest)
+	if disabledResult.Code != http.StatusUnauthorized {
+		t.Fatalf("disabled session status=%d", disabledResult.Code)
+	}
+
+	for _, path := range []string{"/api/admin/orders", "/api/admin/payments", "/api/admin/audit"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.AddCookie(adminCookie)
+		result := httptest.NewRecorder()
+		handler.ServeHTTP(result, request)
+		if result.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", path, result.Code, result.Body.String())
+		}
+	}
 }
 
 func TestAutoReplaceDoesNotAcquireWithoutCancellationConfirmation(t *testing.T) {
