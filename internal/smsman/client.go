@@ -144,6 +144,14 @@ func (c *Client) items(ctx context.Context, method string) ([]Item, error) {
 // Limits returns the provider payload unchanged because SMS-Man can return
 // either a single country/application record or a nested availability table.
 func (c *Client) Limits(ctx context.Context, countryID, applicationID int) (json.RawMessage, error) {
+	return c.filteredPayload(ctx, "limits", countryID, applicationID)
+}
+
+func (c *Client) Prices(ctx context.Context, countryID, applicationID int) (json.RawMessage, error) {
+	return c.filteredPayload(ctx, "get-prices", countryID, applicationID)
+}
+
+func (c *Client) filteredPayload(ctx context.Context, method string, countryID, applicationID int) (json.RawMessage, error) {
 	params := url.Values{}
 	if countryID > 0 {
 		params.Set("country_id", strconv.Itoa(countryID))
@@ -151,14 +159,14 @@ func (c *Client) Limits(ctx context.Context, countryID, applicationID int) (json
 	if applicationID > 0 {
 		params.Set("application_id", strconv.Itoa(applicationID))
 	}
-	body, err := c.call(ctx, "limits", params)
+	body, err := c.call(ctx, method, params)
 	return json.RawMessage(body), err
 }
 
 // Quotes normalizes the different nested limit payloads returned by SMS-Man
 // into application-scoped prices and inventory counts.
 func (c *Client) Quotes(ctx context.Context, countryID int) (map[int]Quote, error) {
-	raw, err := c.Limits(ctx, countryID, 0)
+	raw, err := c.Prices(ctx, countryID, 0)
 	if err != nil {
 		return nil, err
 	}

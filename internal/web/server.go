@@ -26,12 +26,13 @@ import (
 var assets embed.FS
 
 type Server struct {
-	C      config.Config
-	Store  *store.Store
-	Hero   *hero.Client
-	SMSMan *smsman.Client
-	YSM    *yishoumi.Client
-	EPay   *epay.Client
+	C        config.Config
+	Store    *store.Store
+	Hero     *hero.Client
+	SMSMan   *smsman.Client
+	SMSCache *smsmanCatalogCache
+	YSM      *yishoumi.Client
+	EPay     *epay.Client
 }
 type handler func(http.ResponseWriter, *http.Request, store.User)
 
@@ -48,7 +49,7 @@ func New(c config.Config, s *store.Store) *Server {
 	if c.AutoReplaceScan < time.Second {
 		c.AutoReplaceScan = 10 * time.Second
 	}
-	return &Server{C: c, Store: s, Hero: hero.New(c.HeroKey, c.HeroURL, c.HeroCurrency), SMSMan: smsman.New(c.SMSManToken, c.SMSManURL), YSM: yishoumi.New(c.YSMAppID, c.YSMSecret, c.YSMURL), EPay: epay.New(c.EPayPID, c.EPayKey, c.EPayURL)}
+	return &Server{C: c, Store: s, Hero: hero.New(c.HeroKey, c.HeroURL, c.HeroCurrency), SMSMan: smsman.New(c.SMSManToken, c.SMSManURL), SMSCache: newSMSManCatalogCache(), YSM: yishoumi.New(c.YSMAppID, c.YSMSecret, c.YSMURL), EPay: epay.New(c.EPayPID, c.EPayKey, c.EPayURL)}
 }
 func (s *Server) Routes() http.Handler {
 	m := http.NewServeMux()

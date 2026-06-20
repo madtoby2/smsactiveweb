@@ -264,7 +264,7 @@ func TestAggregatedQuoteSelectsSMSManAndRoutesPaidOrder(t *testing.T) {
 			_, _ = w.Write([]byte(`{"99":{"id":99,"name":"Kazakhstan"}}`))
 		case "/applications":
 			_, _ = w.Write([]byte(`{"88":{"id":88,"name":"Telegram"}}`))
-		case "/limits":
+		case "/get-prices":
 			_, _ = w.Write([]byte(`{"88":{"price":50,"count":4}}`))
 		case "/get-number":
 			if r.URL.Query().Get("country_id") != "99" || r.URL.Query().Get("application_id") != "88" {
@@ -279,7 +279,8 @@ func TestAggregatedQuoteSelectsSMSManAndRoutesPaidOrder(t *testing.T) {
 	}))
 	defer smsUpstream.Close()
 	cfg := config.Config{HeroKey: "hero", HeroURL: heroUpstream.URL, HeroCurrency: "840", SMSManToken: "smsman", SMSManURL: smsUpstream.URL, SMSManCNYRate: .08, USDCNY: 7.2, Markup: 1, PayProvider: "sandbox", AllowLiveSMSInSandbox: true}
-	h := New(cfg, db).Routes()
+	server := New(cfg, db)
+	h := server.Routes()
 
 	register := httptest.NewRequest(http.MethodPost, "/api/auth/register", strings.NewReader(`{"Email":"aggregate@example.com","Password":"password123"}`))
 	register.Header.Set("content-type", "application/json")
@@ -324,6 +325,20 @@ func TestAggregatedQuoteSelectsSMSManAndRoutesPaidOrder(t *testing.T) {
 	got, err := db.GetSMSByID(checkout.ID)
 	if err != nil || got.Phone != "77000000001" || got.Code != "246810" || got.Status != "code_received" {
 		t.Fatalf("order=%+v err=%v actions=%v", got, err, smsActions)
+	}
+	if _, err = server.loadCatalog(t.Context(), "2"); err != nil {
+		t.Fatal(err)
+	}
+	for _, endpoint := range []string{"/countries", "/applications", "/get-prices"} {
+		calls := 0
+		for _, action := range smsActions {
+			if action == endpoint {
+				calls++
+			}
+		}
+		if calls != 1 {
+			t.Fatalf("%s calls=%d, want cached single call; actions=%v", endpoint, calls, smsActions)
+		}
 	}
 }
 

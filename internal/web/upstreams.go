@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 	"unicode"
 
 	"sms-platform/internal/hero"
@@ -32,6 +34,54 @@ type catalogSnapshot struct {
 	Countries []hero.Country
 	Services  []hero.Service
 	Quotes    map[string]providerQuote
+}
+
+type smsmanCatalogCache struct {
+	mu              sync.Mutex
+	metadataExpires time.Time
+	countries       []smsman.Item
+	applications    []smsman.Item
+	quoteExpires    map[int]time.Time
+	quotes          map[int]map[int]smsman.Quote
+}
+
+func newSMSManCatalogCache() *smsmanCatalogCache {
+	return &smsmanCatalogCache{quoteExpires: map[int]time.Time{}, quotes: map[int]map[int]smsman.Quote{}}
+}
+
+func (c *smsmanCatalogCache) metadata(ctx context.Context, client *smsman.Client) ([]smsman.Item, []smsman.Item, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if time.Now().Before(c.metadataExpires) && len(c.countries) > 0 && len(c.applications) > 0 {
+		return c.countries, c.applications, nil
+	}
+	countries, err := client.Countries(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	applications, err := client.Applications(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	c.countries = countries
+	c.applications = applications
+	c.metadataExpires = time.Now().Add(time.Hour)
+	return countries, applications, nil
+}
+
+func (c *smsmanCatalogCache) countryQuotes(ctx context.Context, client *smsman.Client, countryID int) (map[int]smsman.Quote, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if time.Now().Before(c.quoteExpires[countryID]) {
+		return c.quotes[countryID], nil
+	}
+	quotes, err := client.Quotes(ctx, countryID)
+	if err != nil {
+		return nil, err
+	}
+	c.quotes[countryID] = quotes
+	c.quoteExpires[countryID] = time.Now().Add(30 * time.Second)
+	return quotes, nil
 }
 
 func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapshot, error) {
@@ -61,7 +111,7 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 		return snapshot, nil
 	}
 
-	countries, err := s.SMSMan.Countries(ctx)
+	countries, applications, err := s.SMSCache.metadata(ctx, s.SMSMan)
 	if err != nil {
 		if s.C.HeroKey != "" && heroErr == nil {
 			return snapshot, nil
@@ -78,13 +128,6 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 		return snapshot, nil
 	}
 
-	applications, err := s.SMSMan.Applications(ctx)
-	if err != nil {
-		if s.C.HeroKey != "" && heroErr == nil {
-			return snapshot, nil
-		}
-		return catalogSnapshot{}, err
-	}
 	if s.C.HeroKey == "" || heroErr != nil {
 		snapshot.Services = nil
 		for _, application := range applications {
@@ -111,7 +154,7 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 		}
 		return snapshot, nil
 	}
-	smsQuotes, err := s.SMSMan.Quotes(ctx, smsCountryID)
+	smsQuotes, err := s.SMSCache.countryQuotes(ctx, s.SMSMan, smsCountryID)
 	if err != nil {
 		if s.C.HeroKey != "" && heroErr == nil {
 			return snapshot, nil

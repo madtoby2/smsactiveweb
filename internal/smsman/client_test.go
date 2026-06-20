@@ -23,11 +23,9 @@ func TestClientProtocol(t *testing.T) {
 			if r.URL.Query().Get("country_id") != "2" {
 				t.Fatal("missing limits filters")
 			}
-			if r.URL.Query().Get("application_id") == "1" {
-				_, _ = w.Write([]byte(`{"count":3,"price":12.5}`))
-			} else {
-				_, _ = w.Write([]byte(`{"1":{"count":3,"price":12.5}}`))
-			}
+			_, _ = w.Write([]byte(`{"1":{"application_id":1,"numbers":3}}`))
+		case "/get-prices":
+			_, _ = w.Write([]byte(`{"1":{"count":3,"cost":12.5,"application_id":1}}`))
 		case "/get-number":
 			_, _ = w.Write([]byte(`{"request_id":1234,"number":"77001234567"}`))
 		case "/get-sms":
