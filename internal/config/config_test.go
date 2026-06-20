@@ -7,6 +7,10 @@ func TestValidate(t *testing.T) {
 	if err := validSandbox.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	validSMSMan := Config{SMSManToken: "token", SMSManURL: "https://api.sms-man.example/control", SMSManCNYRate: 0.08, USDCNY: 7.2, Markup: 1, PayProvider: "sandbox"}
+	if err := validSMSMan.Validate(); err != nil {
+		t.Fatal(err)
+	}
 	validLive := Config{HeroKey: "key", USDCNY: 7.2, Markup: 1, PayProvider: "yishoumi", YSMAppID: "app", YSMSecret: "secret", BaseURL: "https://sms.example.com"}
 	if err := validLive.Validate(); err != nil {
 		t.Fatal(err)
@@ -25,6 +29,7 @@ func TestValidate(t *testing.T) {
 		{HeroKey: "key", USDCNY: 7.2, Markup: 1, PayProvider: "epay", EPayURL: "https://50pay.example", BaseURL: "https://sms.example.com"},
 		{HeroKey: "key", USDCNY: 7.2, Markup: 1, PayProvider: "epay", EPayPID: "1000", EPayKey: "secret", EPayURL: "http://50pay.example", BaseURL: "https://sms.example.com"},
 		{HeroKey: "key", SMSManToken: "smsman", SMSManURL: "http://api.sms-man.example/control", USDCNY: 7.2, Markup: 1, PayProvider: "sandbox"},
+		{SMSManToken: "smsman", SMSManURL: "https://api.sms-man.example/control", SMSManCNYRate: 0, USDCNY: 7.2, Markup: 1, PayProvider: "sandbox"},
 	}
 	for i, cfg := range tests {
 		if err := cfg.Validate(); err == nil {

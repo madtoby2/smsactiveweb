@@ -161,6 +161,10 @@ func TestPayForSMSOrderThenAcquireEndToEnd(t *testing.T) {
 	defer db.Close()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Query().Get("action") {
+		case "getCountries":
+			_, _ = w.Write([]byte(`{"6":{"id":6,"eng":"Indonesia","chn":"印度尼西亚"}}`))
+		case "getServicesList":
+			_, _ = w.Write([]byte(`{"services":[{"code":"tg","name":"Telegram"}]}`))
 		case "getPrices":
 			w.Write([]byte(`{"6":{"tg":{"cost":0.5,"count":3}}}`))
 		case "getNumberV2":
@@ -230,6 +234,145 @@ func TestPayForSMSOrderThenAcquireEndToEnd(t *testing.T) {
 	}
 	if balance != 0 {
 		t.Fatalf("balance=%d, want unchanged balance 0", balance)
+	}
+}
+
+func TestAggregatedQuoteSelectsSMSManAndRoutesPaidOrder(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "aggregate.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	heroUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "getCountries":
+			_, _ = w.Write([]byte(`{"2":{"id":2,"eng":"Kazakhstan","chn":"哈萨克斯坦"}}`))
+		case "getServicesList":
+			_, _ = w.Write([]byte(`{"services":[{"code":"tg","name":"Telegram"}]}`))
+		case "getPrices":
+			_, _ = w.Write([]byte(`{"2":{"tg":{"cost":1,"count":5}}}`))
+		default:
+			http.Error(w, "HeroSMS should not acquire the more expensive number", http.StatusBadRequest)
+		}
+	}))
+	defer heroUpstream.Close()
+	smsActions := []string{}
+	smsUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		smsActions = append(smsActions, r.URL.Path)
+		switch r.URL.Path {
+		case "/countries":
+			_, _ = w.Write([]byte(`{"99":{"id":99,"name":"Kazakhstan"}}`))
+		case "/applications":
+			_, _ = w.Write([]byte(`{"88":{"id":88,"name":"Telegram"}}`))
+		case "/limits":
+			_, _ = w.Write([]byte(`{"88":{"price":50,"count":4}}`))
+		case "/get-number":
+			if r.URL.Query().Get("country_id") != "99" || r.URL.Query().Get("application_id") != "88" {
+				t.Fatal("wrong SMS-Man route")
+			}
+			_, _ = w.Write([]byte(`{"request_id":4321,"number":"77000000001"}`))
+		case "/get-sms":
+			_, _ = w.Write([]byte(`{"sms_code":"246810"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer smsUpstream.Close()
+	cfg := config.Config{HeroKey: "hero", HeroURL: heroUpstream.URL, HeroCurrency: "840", SMSManToken: "smsman", SMSManURL: smsUpstream.URL, SMSManCNYRate: .08, USDCNY: 7.2, Markup: 1, PayProvider: "sandbox", AllowLiveSMSInSandbox: true}
+	h := New(cfg, db).Routes()
+
+	register := httptest.NewRequest(http.MethodPost, "/api/auth/register", strings.NewReader(`{"Email":"aggregate@example.com","Password":"password123"}`))
+	register.Header.Set("content-type", "application/json")
+	registerResult := httptest.NewRecorder()
+	h.ServeHTTP(registerResult, register)
+	session := registerResult.Result().Cookies()[0]
+	purchase := httptest.NewRequest(http.MethodPost, "/api/orders", strings.NewReader(`{"Country":"2","Service":"tg","payType":2}`))
+	purchase.Header.Set("content-type", "application/json")
+	purchase.AddCookie(session)
+	purchaseResult := httptest.NewRecorder()
+	h.ServeHTTP(purchaseResult, purchase)
+	if purchaseResult.Code != http.StatusCreated {
+		t.Fatalf("purchase status=%d body=%s", purchaseResult.Code, purchaseResult.Body.String())
+	}
+	var checkout struct {
+		ID       string `json:"id"`
+		PriceFen int64  `json:"priceFen"`
+		URL      string `json:"checkoutUrl"`
+	}
+	if err = json.NewDecoder(purchaseResult.Body).Decode(&checkout); err != nil {
+		t.Fatal(err)
+	}
+	if checkout.PriceFen != 500 {
+		t.Fatalf("aggregated price=%d, want 500", checkout.PriceFen)
+	}
+	pending, err := db.GetSMSByID(checkout.ID)
+	if err != nil || pending.UpstreamProvider != "smsman" || pending.UpstreamCountry != "99" || pending.UpstreamService != "88" {
+		t.Fatalf("pending=%+v err=%v", pending, err)
+	}
+	checkoutURL, _ := url.Parse(checkout.URL)
+	pay := httptest.NewRequest(http.MethodPost, checkoutURL.Path, strings.NewReader(url.Values{"token": {checkoutURL.Query().Get("token")}}.Encode()))
+	pay.Header.Set("content-type", "application/x-www-form-urlencoded")
+	payResult := httptest.NewRecorder()
+	h.ServeHTTP(payResult, pay)
+	if payResult.Code != http.StatusSeeOther {
+		t.Fatalf("pay status=%d body=%s", payResult.Code, payResult.Body.String())
+	}
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/orders/"+checkout.ID, nil)
+	statusRequest.AddCookie(session)
+	statusResult := httptest.NewRecorder()
+	h.ServeHTTP(statusResult, statusRequest)
+	got, err := db.GetSMSByID(checkout.ID)
+	if err != nil || got.Phone != "77000000001" || got.Code != "246810" || got.Status != "code_received" {
+		t.Fatalf("order=%+v err=%v actions=%v", got, err, smsActions)
+	}
+}
+
+func TestSMSManAutoReplaceRejectsBeforeAcquire(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "smsman-replace.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	u, _, err := db.Register("smsman-replace@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.DB.Exec("UPDATE users SET balance_fen=1000 WHERE id=?", u.ID); err != nil {
+		t.Fatal(err)
+	}
+	o := store.SMSOrder{ID: "SSMSMANREPLACE", UserID: u.ID, UpstreamProvider: "smsman", UpstreamCountry: "99", UpstreamService: "88", Country: "2", Service: "tg", UpstreamCost: 50, PriceFen: 500, AutoReplace: true, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	if err = db.CreateSMS(u, o); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.ActivateSMSWithProvider(o.ID, "smsman", "old-request", "77000000001", 50); err != nil {
+		t.Fatal(err)
+	}
+	actions := []string{}
+	smsUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		actions = append(actions, r.URL.Path)
+		switch r.URL.Path {
+		case "/get-sms":
+			_, _ = w.Write([]byte(`{"error_code":"wait_sms","error_msg":"Waiting"}`))
+		case "/set-status":
+			_, _ = w.Write([]byte(`{"success":true}`))
+		case "/get-number":
+			_, _ = w.Write([]byte(`{"request_id":9876,"number":"77000000002"}`))
+		}
+	}))
+	defer smsUpstream.Close()
+	s := New(config.Config{HeroKey: "hero", SMSManToken: "smsman", SMSManURL: smsUpstream.URL, SMSManCNYRate: .08}, db)
+	current, _ := db.GetSMSByID(o.ID)
+	claimed, err := db.ClaimAutoReplace(o.ID, current.UpstreamID)
+	if err != nil || !claimed {
+		t.Fatalf("claim=%v err=%v", claimed, err)
+	}
+	s.replaceNumber(t.Context(), current)
+	got, err := db.GetSMSByID(o.ID)
+	if err != nil || got.UpstreamID != "9876" || got.Phone != "77000000002" || got.ReplaceAttempts != 1 {
+		t.Fatalf("order=%+v err=%v", got, err)
+	}
+	if strings.Join(actions, ",") != "/get-sms,/set-status,/get-number" {
+		t.Fatalf("actions=%v", actions)
 	}
 }
 

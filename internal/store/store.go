@@ -24,6 +24,8 @@ type SMSOrder struct {
 	UserID           int64  `json:"-"`
 	UpstreamID       string `json:"-"`
 	UpstreamProvider string `json:"-"`
+	UpstreamCountry  string `json:"-"`
+	UpstreamService  string `json:"-"`
 	Country          string
 	Service          string
 	Phone            string
@@ -43,14 +45,14 @@ type Recharge struct {
 	CreatedAt                                               string
 }
 
-const smsOrderSelect = `SELECT id,user_id,COALESCE(upstream_id,''),upstream_provider,country,service,COALESCE(phone,''),status,COALESCE(code,''),upstream_cost,price_fen,auto_replace,replace_attempts,last_number_at,created_at FROM sms_orders`
+const smsOrderSelect = `SELECT id,user_id,COALESCE(upstream_id,''),upstream_provider,COALESCE(upstream_country,''),COALESCE(upstream_service,''),country,service,COALESCE(phone,''),status,COALESCE(code,''),upstream_cost,price_fen,auto_replace,replace_attempts,last_number_at,created_at FROM sms_orders`
 
 type scanner interface {
 	Scan(dest ...any) error
 }
 
 func scanSMS(row scanner, order *SMSOrder) error {
-	return row.Scan(&order.ID, &order.UserID, &order.UpstreamID, &order.UpstreamProvider, &order.Country, &order.Service, &order.Phone, &order.Status, &order.Code, &order.UpstreamCost, &order.PriceFen, &order.AutoReplace, &order.ReplaceAttempts, &order.LastNumberAt, &order.CreatedAt)
+	return row.Scan(&order.ID, &order.UserID, &order.UpstreamID, &order.UpstreamProvider, &order.UpstreamCountry, &order.UpstreamService, &order.Country, &order.Service, &order.Phone, &order.Status, &order.Code, &order.UpstreamCost, &order.PriceFen, &order.AutoReplace, &order.ReplaceAttempts, &order.LastNumberAt, &order.CreatedAt)
 }
 
 func providerOrHero(provider string) string {
@@ -75,7 +77,7 @@ func Open(path string) (*Store, error) {
 	_, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,email TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,balance_fen INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL,expires_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id));
-CREATE TABLE IF NOT EXISTS sms_orders(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,upstream_id TEXT,upstream_provider TEXT NOT NULL DEFAULT 'hero',country TEXT NOT NULL,service TEXT NOT NULL,phone TEXT,status TEXT NOT NULL,code TEXT,upstream_cost REAL NOT NULL,price_fen INTEGER NOT NULL,refunded INTEGER NOT NULL DEFAULT 0,auto_replace INTEGER NOT NULL DEFAULT 0,replace_attempts INTEGER NOT NULL DEFAULT 0,last_number_at TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id),UNIQUE(upstream_provider,upstream_id));
+CREATE TABLE IF NOT EXISTS sms_orders(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,upstream_id TEXT,upstream_provider TEXT NOT NULL DEFAULT 'hero',upstream_country TEXT NOT NULL DEFAULT '',upstream_service TEXT NOT NULL DEFAULT '',country TEXT NOT NULL,service TEXT NOT NULL,phone TEXT,status TEXT NOT NULL,code TEXT,upstream_cost REAL NOT NULL,price_fen INTEGER NOT NULL,refunded INTEGER NOT NULL DEFAULT 0,auto_replace INTEGER NOT NULL DEFAULT 0,replace_attempts INTEGER NOT NULL DEFAULT 0,last_number_at TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id),UNIQUE(upstream_provider,upstream_id));
 CREATE TABLE IF NOT EXISTS sms_attempts(id INTEGER PRIMARY KEY,order_id TEXT NOT NULL,upstream_id TEXT NOT NULL,upstream_provider TEXT NOT NULL DEFAULT 'hero',phone TEXT NOT NULL,status TEXT NOT NULL,upstream_cost REAL NOT NULL,started_at TEXT NOT NULL,ended_at TEXT,FOREIGN KEY(order_id) REFERENCES sms_orders(id),UNIQUE(upstream_provider,upstream_id));
 CREATE TABLE IF NOT EXISTS recharges(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,amount_fen INTEGER NOT NULL,provider TEXT NOT NULL,pay_type TEXT NOT NULL,status TEXT NOT NULL,provider_id TEXT,token TEXT NOT NULL,reference TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS ledger(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,amount_fen INTEGER NOT NULL,kind TEXT NOT NULL,reference TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id));`)
@@ -88,6 +90,8 @@ CREATE TABLE IF NOT EXISTS ledger(id INTEGER PRIMARY KEY,user_id INTEGER NOT NUL
 		"ALTER TABLE sms_orders ADD COLUMN replace_attempts INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE sms_orders ADD COLUMN last_number_at TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE recharges ADD COLUMN reference TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE sms_orders ADD COLUMN upstream_country TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE sms_orders ADD COLUMN upstream_service TEXT NOT NULL DEFAULT ''",
 	} {
 		if _, e := db.Exec(migration); e != nil && !strings.Contains(strings.ToLower(e.Error()), "duplicate column") {
 			db.Close()
@@ -125,8 +129,8 @@ func migrateUpstreamProviders(db *sql.DB) error {
 	}
 	defer tx.Rollback()
 	statements := []string{
-		`CREATE TABLE sms_orders_new(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,upstream_id TEXT,upstream_provider TEXT NOT NULL DEFAULT 'hero',country TEXT NOT NULL,service TEXT NOT NULL,phone TEXT,status TEXT NOT NULL,code TEXT,upstream_cost REAL NOT NULL,price_fen INTEGER NOT NULL,refunded INTEGER NOT NULL DEFAULT 0,auto_replace INTEGER NOT NULL DEFAULT 0,replace_attempts INTEGER NOT NULL DEFAULT 0,last_number_at TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id),UNIQUE(upstream_provider,upstream_id))`,
-		`INSERT INTO sms_orders_new(id,user_id,upstream_id,upstream_provider,country,service,phone,status,code,upstream_cost,price_fen,refunded,auto_replace,replace_attempts,last_number_at,created_at) SELECT id,user_id,upstream_id,'hero',country,service,phone,status,code,upstream_cost,price_fen,refunded,auto_replace,replace_attempts,last_number_at,created_at FROM sms_orders`,
+		`CREATE TABLE sms_orders_new(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,upstream_id TEXT,upstream_provider TEXT NOT NULL DEFAULT 'hero',upstream_country TEXT NOT NULL DEFAULT '',upstream_service TEXT NOT NULL DEFAULT '',country TEXT NOT NULL,service TEXT NOT NULL,phone TEXT,status TEXT NOT NULL,code TEXT,upstream_cost REAL NOT NULL,price_fen INTEGER NOT NULL,refunded INTEGER NOT NULL DEFAULT 0,auto_replace INTEGER NOT NULL DEFAULT 0,replace_attempts INTEGER NOT NULL DEFAULT 0,last_number_at TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id),UNIQUE(upstream_provider,upstream_id))`,
+		`INSERT INTO sms_orders_new(id,user_id,upstream_id,upstream_provider,upstream_country,upstream_service,country,service,phone,status,code,upstream_cost,price_fen,refunded,auto_replace,replace_attempts,last_number_at,created_at) SELECT id,user_id,upstream_id,'hero',upstream_country,upstream_service,country,service,phone,status,code,upstream_cost,price_fen,refunded,auto_replace,replace_attempts,last_number_at,created_at FROM sms_orders`,
 		`CREATE TABLE sms_attempts_new(id INTEGER PRIMARY KEY,order_id TEXT NOT NULL,upstream_id TEXT NOT NULL,upstream_provider TEXT NOT NULL DEFAULT 'hero',phone TEXT NOT NULL,status TEXT NOT NULL,upstream_cost REAL NOT NULL,started_at TEXT NOT NULL,ended_at TEXT,FOREIGN KEY(order_id) REFERENCES sms_orders_new(id),UNIQUE(upstream_provider,upstream_id))`,
 		`INSERT INTO sms_attempts_new(id,order_id,upstream_id,upstream_provider,phone,status,upstream_cost,started_at,ended_at) SELECT id,order_id,upstream_id,'hero',phone,status,upstream_cost,started_at,ended_at FROM sms_attempts`,
 		`DROP TABLE sms_attempts`,
@@ -259,7 +263,7 @@ func (s *Store) CreateSMS(u User, o SMSOrder) error {
 	if n != 1 {
 		return errors.New("余额不足")
 	}
-	_, e = tx.Exec(`INSERT INTO sms_orders(id,user_id,upstream_provider,country,service,status,upstream_cost,price_fen,auto_replace,created_at)VALUES(?,?,?,?,?,?,?,?,?,?)`, o.ID, u.ID, providerOrHero(o.UpstreamProvider), o.Country, o.Service, "purchasing", o.UpstreamCost, o.PriceFen, o.AutoReplace, o.CreatedAt)
+	_, e = tx.Exec(`INSERT INTO sms_orders(id,user_id,upstream_provider,upstream_country,upstream_service,country,service,status,upstream_cost,price_fen,auto_replace,created_at)VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, o.ID, u.ID, providerOrHero(o.UpstreamProvider), o.UpstreamCountry, o.UpstreamService, o.Country, o.Service, "purchasing", o.UpstreamCost, o.PriceFen, o.AutoReplace, o.CreatedAt)
 	if e != nil {
 		return e
 	}
@@ -276,7 +280,7 @@ func (s *Store) CreateSMSPayment(u User, o SMSOrder, p Recharge) error {
 		return e
 	}
 	defer tx.Rollback()
-	if _, e = tx.Exec(`INSERT INTO sms_orders(id,user_id,upstream_provider,country,service,status,upstream_cost,price_fen,auto_replace,created_at)VALUES(?,?,?,?,?,?,?,?,?,?)`, o.ID, u.ID, providerOrHero(o.UpstreamProvider), o.Country, o.Service, "awaiting_payment", o.UpstreamCost, o.PriceFen, o.AutoReplace, o.CreatedAt); e != nil {
+	if _, e = tx.Exec(`INSERT INTO sms_orders(id,user_id,upstream_provider,upstream_country,upstream_service,country,service,status,upstream_cost,price_fen,auto_replace,created_at)VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, o.ID, u.ID, providerOrHero(o.UpstreamProvider), o.UpstreamCountry, o.UpstreamService, o.Country, o.Service, "awaiting_payment", o.UpstreamCost, o.PriceFen, o.AutoReplace, o.CreatedAt); e != nil {
 		return e
 	}
 	if _, e = tx.Exec(`INSERT INTO recharges(id,user_id,amount_fen,provider,pay_type,status,token,reference,created_at)VALUES(?,?,?,?,?,'pending',?,?,?)`, p.ID, u.ID, p.AmountFen, p.Provider, p.PayType, p.Token, o.ID, p.CreatedAt); e != nil {

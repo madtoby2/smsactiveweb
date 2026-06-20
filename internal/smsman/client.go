@@ -28,6 +28,14 @@ type Activation struct {
 	ID, Phone string
 }
 
+type Quote struct {
+	ApplicationID int
+	Price         float64
+	Count         int
+}
+
+var ErrSMSPending = errors.New("SMS-Man code is pending")
+
 type APIError struct {
 	Code, Message string
 }
@@ -147,6 +155,71 @@ func (c *Client) Limits(ctx context.Context, countryID, applicationID int) (json
 	return json.RawMessage(body), err
 }
 
+// Quotes normalizes the different nested limit payloads returned by SMS-Man
+// into application-scoped prices and inventory counts.
+func (c *Client) Quotes(ctx context.Context, countryID int) (map[int]Quote, error) {
+	raw, err := c.Limits(ctx, countryID, 0)
+	if err != nil {
+		return nil, err
+	}
+	var payload any
+	if err = json.Unmarshal(raw, &payload); err != nil {
+		return nil, err
+	}
+	out := map[int]Quote{}
+	walkQuotes(payload, 0, out)
+	return out, nil
+}
+
+func walkQuotes(value any, applicationHint int, out map[int]Quote) {
+	switch current := value.(type) {
+	case []any:
+		for _, item := range current {
+			walkQuotes(item, applicationHint, out)
+		}
+	case map[string]any:
+		applicationID := int(number(current["application_id"]))
+		if applicationID == 0 {
+			applicationID = int(number(current["applicationId"]))
+		}
+		if applicationID == 0 {
+			applicationID = applicationHint
+		}
+		price := number(current["price"])
+		if price == 0 {
+			price = number(current["cost"])
+		}
+		count := int(number(current["count"]))
+		if applicationID > 0 && price > 0 && count > 0 {
+			quote := Quote{ApplicationID: applicationID, Price: price, Count: count}
+			if existing, ok := out[applicationID]; !ok || quote.Price < existing.Price {
+				out[applicationID] = quote
+			}
+		}
+		for key, child := range current {
+			hint := applicationHint
+			if id, parseErr := strconv.Atoi(key); parseErr == nil {
+				hint = id
+			}
+			walkQuotes(child, hint, out)
+		}
+	}
+}
+
+func number(value any) float64 {
+	switch current := value.(type) {
+	case float64:
+		return current
+	case json.Number:
+		result, _ := current.Float64()
+		return result
+	case string:
+		result, _ := strconv.ParseFloat(current, 64)
+		return result
+	}
+	return 0
+}
+
 func (c *Client) Acquire(ctx context.Context, countryID, applicationID int) (Activation, error) {
 	body, err := c.call(ctx, "get-number", url.Values{
 		"country_id":     {strconv.Itoa(countryID)},
@@ -180,12 +253,30 @@ func (c *Client) SMS(ctx context.Context, requestID string) (string, error) {
 		return "", err
 	}
 	if response.Code == "" {
-		return "", errors.New("SMS-Man returned an empty code")
+		return "", ErrSMSPending
 	}
 	return response.Code, nil
 }
 
+func IsPending(err error) bool {
+	if errors.Is(err, ErrSMSPending) {
+		return true
+	}
+	code := strings.ToLower(ErrorCode(err))
+	return code == "wait_sms" || code == "sms_not_found" || code == "no_sms"
+}
+
 func (c *Client) Reject(ctx context.Context, requestID string) error {
-	_, err := c.call(ctx, "set-status", url.Values{"request_id": {requestID}, "status": {"reject"}})
-	return err
+	body, err := c.call(ctx, "set-status", url.Values{"request_id": {requestID}, "status": {"reject"}})
+	if err != nil {
+		return err
+	}
+	var response struct {
+		Success bool   `json:"success"`
+		Status  string `json:"status"`
+	}
+	if json.Unmarshal(body, &response) != nil || (!response.Success && !strings.EqualFold(response.Status, "success")) {
+		return errors.New("SMS-Man did not confirm rejection")
+	}
+	return nil
 }

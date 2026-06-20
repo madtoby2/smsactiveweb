@@ -20,10 +20,14 @@ func TestClientProtocol(t *testing.T) {
 		case "/applications":
 			_, _ = w.Write([]byte(`{"1":{"id":1,"title":"Telegram"}}`))
 		case "/limits":
-			if r.URL.Query().Get("country_id") != "2" || r.URL.Query().Get("application_id") != "1" {
+			if r.URL.Query().Get("country_id") != "2" {
 				t.Fatal("missing limits filters")
 			}
-			_, _ = w.Write([]byte(`{"count":3,"price":12.5}`))
+			if r.URL.Query().Get("application_id") == "1" {
+				_, _ = w.Write([]byte(`{"count":3,"price":12.5}`))
+			} else {
+				_, _ = w.Write([]byte(`{"1":{"count":3,"price":12.5}}`))
+			}
 		case "/get-number":
 			_, _ = w.Write([]byte(`{"request_id":1234,"number":"77001234567"}`))
 		case "/get-sms":
@@ -52,6 +56,10 @@ func TestClientProtocol(t *testing.T) {
 	if err != nil || !json.Valid(limits) {
 		t.Fatalf("limits=%s err=%v", limits, err)
 	}
+	quotes, err := client.Quotes(context.Background(), 2)
+	if err != nil || quotes[1].Price != 12.5 || quotes[1].Count != 3 {
+		t.Fatalf("quotes=%v err=%v", quotes, err)
+	}
 	activation, err := client.Acquire(context.Background(), 2, 1)
 	if err != nil || activation.ID != "1234" || activation.Phone != "77001234567" {
 		t.Fatalf("activation=%+v err=%v", activation, err)
@@ -62,6 +70,27 @@ func TestClientProtocol(t *testing.T) {
 	}
 	if err = client.Reject(context.Background(), activation.ID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestQuotesParsesNestedLimitPayloads(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"2":{"1":{"price":"12.5","count":"3"},"7":{"cost":8,"count":2}}}`))
+	}))
+	defer server.Close()
+	quotes, err := New("secret", server.URL).Quotes(context.Background(), 2)
+	if err != nil || len(quotes) != 2 || quotes[1].Price != 12.5 || quotes[7].Price != 8 {
+		t.Fatalf("quotes=%v err=%v", quotes, err)
+	}
+}
+
+func TestRejectRequiresExplicitSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":false}`))
+	}))
+	defer server.Close()
+	if err := New("secret", server.URL).Reject(context.Background(), "123"); err == nil {
+		t.Fatal("reject succeeded without provider confirmation")
 	}
 }
 

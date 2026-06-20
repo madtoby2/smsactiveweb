@@ -17,7 +17,6 @@ import (
 	"sms-platform/internal/config"
 	"sms-platform/internal/epay"
 	"sms-platform/internal/hero"
-	"sms-platform/internal/pricing"
 	"sms-platform/internal/smsman"
 	"sms-platform/internal/store"
 	"sms-platform/internal/yishoumi"
@@ -169,34 +168,25 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request, u store.User) {
 
 func (s *Server) catalog(w http.ResponseWriter, r *http.Request, u store.User) {
 	country := r.URL.Query().Get("country")
-	countries, e := s.Hero.Countries(r.Context())
+	snapshot, e := s.loadCatalog(r.Context(), country)
 	if e != nil {
 		fail(w, 502, e)
 		return
 	}
 	if country == "" {
-		jsonOut(w, 200, map[string]any{"countries": countries})
-		return
-	}
-	services, e := s.Hero.Services(r.Context(), country)
-	if e != nil {
-		fail(w, 502, e)
-		return
-	}
-	offers, e := s.Hero.Offers(r.Context(), country)
-	if e != nil {
-		fail(w, 502, e)
+		jsonOut(w, 200, map[string]any{"countries": snapshot.Countries})
 		return
 	}
 	type priced struct {
-		hero.Offer
-		PriceFen int64 `json:"priceFen"`
+		Service  string `json:"service"`
+		Count    int    `json:"count"`
+		PriceFen int64  `json:"priceFen"`
 	}
-	po := make([]priced, 0, len(offers))
-	for _, o := range offers {
-		po = append(po, priced{o, pricing.SaleFen(o.Cost, s.C.USDCNY, s.C.Markup)})
+	po := make([]priced, 0, len(snapshot.Quotes))
+	for _, quote := range snapshot.Quotes {
+		po = append(po, priced{Service: quote.Service, Count: quote.Count, PriceFen: quote.priceFen(s.C.Markup)})
 	}
-	jsonOut(w, 200, map[string]any{"countries": countries, "services": services, "offers": po})
+	jsonOut(w, 200, map[string]any{"countries": snapshot.Countries, "services": snapshot.Services, "offers": po})
 }
 func (s *Server) orders(w http.ResponseWriter, r *http.Request, u store.User) {
 	x, e := s.Store.ListSMS(u.ID)
@@ -219,19 +209,13 @@ func (s *Server) purchase(w http.ResponseWriter, r *http.Request, u store.User) 
 		fail(w, 400, "请选择国家和服务")
 		return
 	}
-	offers, e := s.Hero.Offers(r.Context(), in.Country)
+	snapshot, e := s.loadCatalog(r.Context(), in.Country)
 	if e != nil {
 		fail(w, 502, e)
 		return
 	}
-	var offer *hero.Offer
-	for i := range offers {
-		if offers[i].Service == in.Service && offers[i].Count > 0 {
-			offer = &offers[i]
-			break
-		}
-	}
-	if offer == nil {
+	quote, ok := snapshot.Quotes[in.Service]
+	if !ok || quote.Count <= 0 {
 		fail(w, 409, "该服务暂时无库存")
 		return
 	}
@@ -243,7 +227,7 @@ func (s *Server) purchase(w http.ResponseWriter, r *http.Request, u store.User) 
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	o := store.SMSOrder{ID: store.ID("S"), UserID: u.ID, UpstreamProvider: "hero", Country: in.Country, Service: in.Service, UpstreamCost: offer.Cost, PriceFen: pricing.SaleFen(offer.Cost, s.C.USDCNY, s.C.Markup), AutoReplace: true, CreatedAt: now}
+	o := store.SMSOrder{ID: store.ID("S"), UserID: u.ID, UpstreamProvider: quote.Provider, UpstreamCountry: quote.ProviderCountry, UpstreamService: quote.ProviderService, Country: in.Country, Service: in.Service, UpstreamCost: quote.Cost, PriceFen: quote.priceFen(s.C.Markup), AutoReplace: true, CreatedAt: now}
 	raw, _ := store.Token()
 	payment := store.Recharge{ID: store.ID("P"), UserID: u.ID, AmountFen: o.PriceFen, Provider: s.C.PayProvider, PayType: strconv.Itoa(in.PayType), Token: raw, Reference: o.ID, CreatedAt: now}
 	if e = s.Store.CreateSMSPayment(u, o, payment); e != nil {
@@ -288,9 +272,8 @@ func (s *Server) orderStatus(w http.ResponseWriter, r *http.Request, u store.Use
 		o, _ = s.Store.GetSMS(o.ID, u.ID)
 	}
 	if o.UpstreamID != "" && o.Status == "waiting" {
-		st, e := s.Hero.Status(r.Context(), o.UpstreamID)
+		status, code, e := s.providerStatus(r.Context(), o)
 		if e == nil {
-			status, code := parseHeroStatus(st)
 			_ = s.Store.UpdateSMS(o.ID, status, code)
 			o, _ = s.Store.GetSMS(o.ID, u.ID)
 		}
@@ -333,12 +316,12 @@ func (s *Server) cancel(w http.ResponseWriter, r *http.Request, u store.User) {
 		fail(w, 409, "order is not cancellable in its current state")
 		return
 	}
-	result, e := s.Hero.SetStatus(r.Context(), o.UpstreamID, "8")
+	cancelled, e := s.cancelUpstream(r.Context(), o)
 	if e != nil {
 		fail(w, 409, e)
 		return
 	}
-	if !hero.CancellationSucceeded(result) {
+	if !cancelled {
 		fail(w, 409, "上游未确认取消")
 		return
 	}
@@ -390,7 +373,7 @@ func (s *Server) fulfillPaidOrder(ctx context.Context, o store.SMSOrder) {
 	if err != nil || !claimed {
 		return
 	}
-	act, err := s.Hero.Acquire(ctx, o.Country, o.Service, o.UpstreamCost)
+	act, err := s.acquireNumber(ctx, o)
 	if err != nil {
 		_ = s.Store.ReleasePaidSMS(o.ID)
 		log.Printf("paid SMS order %s is waiting for inventory: %v", o.ID, err)
@@ -434,12 +417,11 @@ func (s *Server) runAutoReplaceBatch(ctx context.Context) {
 }
 
 func (s *Server) replaceNumber(ctx context.Context, o store.SMSOrder) {
-	st, err := s.Hero.Status(ctx, o.UpstreamID)
+	status, code, err := s.providerStatus(ctx, o)
 	if err != nil {
 		_ = s.Store.ReleaseAutoReplace(o.ID, false)
 		return
 	}
-	status, code := parseHeroStatus(st)
 	if status == "cancelled" {
 		s.acquireReplacement(ctx, o)
 		return
@@ -448,7 +430,7 @@ func (s *Server) replaceNumber(ctx context.Context, o store.SMSOrder) {
 		_ = s.Store.UpdateSMS(o.ID, status, code)
 		return
 	}
-	result, err := s.Hero.SetStatus(ctx, o.UpstreamID, "8")
+	cancelled, err := s.cancelUpstream(ctx, o)
 	if err != nil {
 		switch hero.ErrorCode(err) {
 		case "OTP_RECEIVED", "NEW_OTP_RECEIVED":
@@ -464,7 +446,7 @@ func (s *Server) replaceNumber(ctx context.Context, o store.SMSOrder) {
 		_ = s.Store.ReleaseAutoReplace(o.ID, false)
 		return
 	}
-	if !hero.CancellationSucceeded(result) {
+	if !cancelled {
 		_ = s.Store.ReleaseAutoReplace(o.ID, false)
 		return
 	}
@@ -473,7 +455,7 @@ func (s *Server) replaceNumber(ctx context.Context, o store.SMSOrder) {
 
 func (s *Server) acquireReplacement(ctx context.Context, o store.SMSOrder) {
 	_ = s.Store.EndCurrentAttemptWithProvider(o.ID, o.UpstreamProvider, o.UpstreamID, "cancelled")
-	act, err := s.Hero.Acquire(ctx, o.Country, o.Service, o.UpstreamCost)
+	act, err := s.acquireNumber(ctx, o)
 	if err != nil {
 		_ = s.Store.TouchReplacing(o.ID)
 		log.Printf("auto replace waiting for inventory for %s: %v", o.ID, err)
