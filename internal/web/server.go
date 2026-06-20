@@ -338,7 +338,7 @@ func (s *Server) cancel(w http.ResponseWriter, r *http.Request, u store.User) {
 		fail(w, 409, e)
 		return
 	}
-	if !strings.Contains(result, "CANCEL") && !strings.Contains(result, "ACCESS") {
+	if !hero.CancellationSucceeded(result) {
 		fail(w, 409, "上游未确认取消")
 		return
 	}
@@ -464,7 +464,7 @@ func (s *Server) replaceNumber(ctx context.Context, o store.SMSOrder) {
 		_ = s.Store.ReleaseAutoReplace(o.ID, false)
 		return
 	}
-	if !strings.Contains(result, "CANCEL") && !strings.Contains(result, "ACCESS") {
+	if !hero.CancellationSucceeded(result) {
 		_ = s.Store.ReleaseAutoReplace(o.ID, false)
 		return
 	}

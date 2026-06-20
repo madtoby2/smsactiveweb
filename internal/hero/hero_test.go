@@ -53,3 +53,16 @@ func TestAPIErrorCodeFromJSON(t *testing.T) {
 		t.Fatalf("code=%q err=%v", ErrorCode(err), err)
 	}
 }
+
+func TestCancellationSucceededRequiresExplicitConfirmation(t *testing.T) {
+	for _, response := range []string{`ACCESS_CANCEL`, `"ACCESS_CANCEL"`, `{"title":"CANCELED"}`, `{"title":"REFUNDED"}`} {
+		if !CancellationSucceeded(response) {
+			t.Fatalf("expected cancellation response %q to succeed", response)
+		}
+	}
+	for _, response := range []string{`ACCESS_ACTIVATION`, `ACCESS_READY`, `STATUS_CANCEL`, `{"title":"FINISHED"}`, `garbage`} {
+		if CancellationSucceeded(response) {
+			t.Fatalf("unexpected cancellation success for %q", response)
+		}
+	}
+}

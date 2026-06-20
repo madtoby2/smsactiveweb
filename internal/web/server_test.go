@@ -80,6 +80,55 @@ func TestAutoReplaceCancelsThenAcquiresWithoutChargingAgain(t *testing.T) {
 	}
 }
 
+func TestAutoReplaceDoesNotAcquireWithoutCancellationConfirmation(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "cancel-confirmation.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	u, _, err := db.Register("cancel-confirmation@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.DB.Exec("UPDATE users SET balance_fen=1000 WHERE id=?", u.ID); err != nil {
+		t.Fatal(err)
+	}
+	o := store.SMSOrder{ID: "SCANCELCONFIRM", UserID: u.ID, Country: "6", Service: "tg", UpstreamCost: .5, PriceFen: 460, AutoReplace: true, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	if err = db.CreateSMS(u, o); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.ActivateSMS(o.ID, "old-id", "10001", .5); err != nil {
+		t.Fatal(err)
+	}
+	acquireCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "getStatus":
+			_, _ = w.Write([]byte("STATUS_WAIT_CODE"))
+		case "setStatus":
+			_, _ = w.Write([]byte("ACCESS_ACTIVATION"))
+		case "getNumberV2":
+			acquireCalls++
+			_, _ = w.Write([]byte(`{"activationId":"must-not-exist","phoneNumber":"10002","activationCost":0.5}`))
+		}
+	}))
+	defer upstream.Close()
+	s := New(config.Config{HeroKey: "key", HeroURL: upstream.URL, HeroCurrency: "840"}, db)
+	current, _ := db.GetSMS(o.ID, u.ID)
+	claimed, err := db.ClaimAutoReplace(o.ID, current.UpstreamID)
+	if err != nil || !claimed {
+		t.Fatalf("claim=%v err=%v", claimed, err)
+	}
+	s.replaceNumber(t.Context(), current)
+	got, err := db.GetSMS(o.ID, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acquireCalls != 0 || got.UpstreamID != "old-id" || got.Status != "waiting" {
+		t.Fatalf("acquireCalls=%d order=%+v", acquireCalls, got)
+	}
+}
+
 func TestAuthenticatedRequestRefreshesPersistentSessionCookie(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "session.db"))
 	if err != nil {

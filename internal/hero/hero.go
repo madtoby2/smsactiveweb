@@ -215,3 +215,21 @@ func (c *Client) SetStatus(ctx context.Context, id, status string) (string, erro
 	b, e := c.call(ctx, "setStatus", map[string]string{"id": id, "status": status})
 	return strings.Trim(strings.TrimSpace(string(b)), `"`), e
 }
+
+// CancellationSucceeded only accepts responses that explicitly confirm the
+// activation was cancelled or refunded. Other ACCESS_* responses represent
+// different lifecycle transitions and must never trigger acquisition of a new
+// number.
+func CancellationSucceeded(response string) bool {
+	response = strings.TrimSpace(response)
+	if strings.EqualFold(strings.Trim(response, `"`), "ACCESS_CANCEL") {
+		return true
+	}
+	var payload struct {
+		Title string `json:"title"`
+	}
+	if json.Unmarshal([]byte(response), &payload) != nil {
+		return false
+	}
+	return strings.EqualFold(payload.Title, "CANCELED") || strings.EqualFold(payload.Title, "REFUNDED")
+}
