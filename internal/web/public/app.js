@@ -264,15 +264,18 @@ document.addEventListener('keydown', event => { if (event.key === 'Escape') clos
 
 async function loadCatalog() {
   const data = await api('/api/catalog');
-  $('#country').innerHTML = '<option value="">选择国家</option>' + data.countries.filter(country => country.visible !== 0).map(country => `<option value="${country.id}">${escapeHTML(country.chn || country.eng)} · ${escapeHTML(country.eng)}</option>`).join('');
+  $('#country').innerHTML = '<option value="">不限国家（自动最低价）</option>' + data.countries.filter(country => country.visible !== 0).map(country => `<option value="${country.id}">${escapeHTML(country.chn || country.eng)} · ${escapeHTML(country.eng)}</option>`).join('');
+  state.services = data.services || [];
+  state.offers = data.offers || [];
+  renderServices();
 }
 $('#country').onchange = async () => {
-  if (!$('#country').value) return;
-  state.selectedService = '';
   $('#service').innerHTML = '<div class="service-loading">载入中...</div>';
-  const data = await api(`/api/catalog?country=${encodeURIComponent($('#country').value)}`);
+  const country = $('#country').value;
+  const data = await api(country ? `/api/catalog?country=${encodeURIComponent(country)}` : '/api/catalog');
   state.services = data.services;
   state.offers = data.offers;
+  if (!state.offers.some(offer => offer.service === state.selectedService)) state.selectedService = '';
   renderServices();
 };
 $('#search').oninput = renderServices;
@@ -293,7 +296,9 @@ function selectOffer() {
   const offer = state.offers.find(item => item.service === state.selectedService);
   $('#buy').disabled = !offer || !state.liveSmsPurchaseEnabled;
   $('#price').textContent = offer ? money(offer.priceFen) : '请选择服务';
-  $('#stock').textContent = offer ? (state.liveSmsPurchaseEnabled ? `实时库存 ${offer.count} 个` : `实时库存 ${offer.count} 个 · 演示环境`) : '';
+  const cheapestCountry = offer ? Array.from($('#country').options).find(option => option.value === String(offer.country))?.textContent || offer.country : '';
+  const scope = offer && !$('#country').value ? ` · 全球最低价国家 ${cheapestCountry}` : '';
+  $('#stock').textContent = offer ? (state.liveSmsPurchaseEnabled ? `实时库存 ${offer.count} 个${scope}` : `实时库存 ${offer.count} 个${scope} · 演示环境`) : '';
 }
 
 $('#buy').onclick = async () => {

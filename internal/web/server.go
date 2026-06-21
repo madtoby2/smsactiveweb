@@ -318,19 +318,16 @@ func (s *Server) catalog(w http.ResponseWriter, r *http.Request, u store.User) {
 		fail(w, 502, e)
 		return
 	}
-	if country == "" {
-		jsonOut(w, 200, map[string]any{"countries": snapshot.Countries})
-		return
-	}
 	type priced struct {
 		Service  string `json:"service"`
+		Country  string `json:"country"`
 		Count    int    `json:"count"`
 		PriceFen int64  `json:"priceFen"`
 	}
 	po := make([]priced, 0, len(snapshot.Quotes))
 	markup := s.effectivePricing().Markup
 	for _, quote := range snapshot.Quotes {
-		po = append(po, priced{Service: quote.Service, Count: quote.Count, PriceFen: quote.priceFen(markup)})
+		po = append(po, priced{Service: quote.Service, Country: quote.Country, Count: quote.Count, PriceFen: quote.priceFen(markup)})
 	}
 	jsonOut(w, 200, map[string]any{"countries": snapshot.Countries, "services": snapshot.Services, "offers": po})
 }
@@ -351,8 +348,8 @@ func (s *Server) purchase(w http.ResponseWriter, r *http.Request, u store.User) 
 		Country, Service string
 		PayType          int `json:"payType"`
 	}
-	if decode(r, &in) != nil || in.Country == "" || in.Service == "" {
-		fail(w, 400, "请选择国家和服务")
+	if decode(r, &in) != nil || in.Service == "" {
+		fail(w, 400, "请选择服务")
 		return
 	}
 	snapshot, e := s.loadCatalog(r.Context(), in.Country)
@@ -373,7 +370,11 @@ func (s *Server) purchase(w http.ResponseWriter, r *http.Request, u store.User) 
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	o := store.SMSOrder{ID: store.ID("S"), UserID: u.ID, UpstreamProvider: quote.Provider, UpstreamCountry: quote.ProviderCountry, UpstreamService: quote.ProviderService, Country: in.Country, Service: in.Service, UpstreamCost: quote.Cost, PriceFen: quote.priceFen(s.effectivePricing().Markup), AutoReplace: true, CreatedAt: now}
+	selectedCountry := in.Country
+	if selectedCountry == "" {
+		selectedCountry = quote.Country
+	}
+	o := store.SMSOrder{ID: store.ID("S"), UserID: u.ID, UpstreamProvider: quote.Provider, UpstreamCountry: quote.ProviderCountry, UpstreamService: quote.ProviderService, Country: selectedCountry, Service: in.Service, UpstreamCost: quote.Cost, PriceFen: quote.priceFen(s.effectivePricing().Markup), AutoReplace: true, CreatedAt: now}
 	raw, _ := store.Token()
 	payment := store.Recharge{ID: store.ID("P"), UserID: u.ID, AmountFen: o.PriceFen, Provider: s.C.PayProvider, PayType: strconv.Itoa(in.PayType), Token: raw, Reference: o.ID, CreatedAt: now}
 	if e = s.Store.CreateSMSPayment(u, o, payment); e != nil {

@@ -34,6 +34,69 @@ type Quote struct {
 	Count         int
 }
 
+func (c *Client) GlobalQuotes(ctx context.Context) (map[int]map[int]Quote, error) {
+	raw, err := c.Prices(ctx, 0, 0)
+	if err != nil {
+		return nil, err
+	}
+	var payload any
+	if err = json.Unmarshal(raw, &payload); err != nil {
+		return nil, err
+	}
+	out := map[int]map[int]Quote{}
+	walkGlobalQuotes(payload, 0, 0, out)
+	return out, nil
+}
+
+func walkGlobalQuotes(value any, countryHint, applicationHint int, out map[int]map[int]Quote) {
+	switch current := value.(type) {
+	case []any:
+		for _, item := range current {
+			walkGlobalQuotes(item, countryHint, applicationHint, out)
+		}
+	case map[string]any:
+		countryID := int(number(current["country_id"]))
+		if countryID == 0 {
+			countryID = int(number(current["countryId"]))
+		}
+		if countryID == 0 {
+			countryID = countryHint
+		}
+		applicationID := int(number(current["application_id"]))
+		if applicationID == 0 {
+			applicationID = int(number(current["applicationId"]))
+		}
+		if applicationID == 0 {
+			applicationID = applicationHint
+		}
+		price := number(current["price"])
+		if price == 0 {
+			price = number(current["cost"])
+		}
+		count := int(number(current["count"]))
+		if countryID > 0 && applicationID > 0 && price > 0 && count > 0 {
+			if out[countryID] == nil {
+				out[countryID] = map[int]Quote{}
+			}
+			candidate := Quote{ApplicationID: applicationID, Price: price, Count: count}
+			if existing, ok := out[countryID][applicationID]; !ok || candidate.Price < existing.Price {
+				out[countryID][applicationID] = candidate
+			}
+		}
+		for key, child := range current {
+			nextCountry, nextApplication := countryHint, applicationHint
+			if id, parseErr := strconv.Atoi(key); parseErr == nil {
+				if nextCountry == 0 {
+					nextCountry = id
+				} else {
+					nextApplication = id
+				}
+			}
+			walkGlobalQuotes(child, nextCountry, nextApplication, out)
+		}
+	}
+}
+
 var ErrSMSPending = errors.New("SMS-Man code is pending")
 
 type APIError struct {

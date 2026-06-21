@@ -693,6 +693,55 @@ func TestAggregatedQuoteSelectsSMSManAndRoutesPaidOrder(t *testing.T) {
 	}
 }
 
+func TestGlobalCheapestQuotePurchasesItsCountryWithoutCountrySelection(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "global-cheapest.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "getCountries":
+			_, _ = w.Write([]byte(`{"6":{"id":6,"eng":"Indonesia","chn":"印度尼西亚"},"7":{"id":7,"eng":"Malaysia","chn":"马来西亚"}}`))
+		case "getServicesList":
+			_, _ = w.Write([]byte(`{"services":[{"code":"tg","name":"Telegram"}]}`))
+		case "getPrices":
+			if r.URL.Query().Get("country") != "" {
+				t.Fatalf("expected global prices request")
+			}
+			_, _ = w.Write([]byte(`{"6":{"tg":{"cost":0.5,"count":2}},"7":{"tg":{"cost":0.2,"count":4}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+	server := New(config.Config{HeroKey: "hero", HeroURL: upstream.URL, HeroCurrency: "840", USDCNY: 7.2, Markup: 1, PayProvider: "sandbox", AllowLiveSMSInSandbox: true}, db)
+	handler := server.Routes()
+	_, session, err := db.Register("global@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/orders", strings.NewReader(`{"Country":"","Service":"tg","payType":2}`))
+	request.Header.Set("content-type", "application/json")
+	request.AddCookie(&http.Cookie{Name: "session", Value: session})
+	result := httptest.NewRecorder()
+	handler.ServeHTTP(result, request)
+	if result.Code != http.StatusCreated {
+		t.Fatalf("purchase status=%d body=%s", result.Code, result.Body.String())
+	}
+	var checkout struct {
+		ID       string `json:"id"`
+		PriceFen int64  `json:"priceFen"`
+	}
+	if err = json.NewDecoder(result.Body).Decode(&checkout); err != nil {
+		t.Fatal(err)
+	}
+	order, err := db.GetSMSByID(checkout.ID)
+	if err != nil || order.Country != "7" || order.UpstreamCountry != "7" || checkout.PriceFen != 245 {
+		t.Fatalf("order=%+v price=%d err=%v", order, checkout.PriceFen, err)
+	}
+}
+
 func TestSMSManAutoReplaceRejectsBeforeAcquire(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "smsman-replace.db"))
 	if err != nil {

@@ -43,6 +43,26 @@ func TestSMSActivateCompatibilityResponses(t *testing.T) {
 	}
 }
 
+func TestGlobalOffersKeepCountryAndReturnEveryCountry(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"6":{"tg":{"cost":0.4,"count":2}},"7":{"tg":{"cost":0.2,"count":3},"go":{"cost":0.3,"count":1}}}`))
+	}))
+	defer server.Close()
+	offers, err := New("key", server.URL, "840").Offers(context.Background(), "")
+	if err != nil || len(offers) != 3 {
+		t.Fatalf("offers=%v err=%v", offers, err)
+	}
+	found := false
+	for _, offer := range offers {
+		if offer.Country == "7" && offer.Service == "tg" && offer.Cost == 0.2 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("global offers lost country routing: %+v", offers)
+	}
+}
+
 func TestAPIErrorCodeFromJSON(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"title": "FREE_CANCELLATION_EXPIRED"}`))

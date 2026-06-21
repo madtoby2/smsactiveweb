@@ -29,6 +29,7 @@ type Service struct {
 }
 type Offer struct {
 	Service string  `json:"service"`
+	Country string  `json:"country"`
 	Cost    float64 `json:"cost"`
 	Count   int     `json:"count"`
 }
@@ -148,23 +149,46 @@ func (c *Client) Offers(ctx context.Context, country string) ([]Offer, error) {
 		}
 	}
 	var out []Offer
+	if country == "" {
+		if m, ok := root.(map[string]any); ok {
+			for countryID, services := range m {
+				if countryID == "data" {
+					if data, dataOK := services.(map[string]any); dataOK {
+						for nestedCountry, nestedServices := range data {
+							appendCountryOffers(&out, nestedCountry, nestedServices)
+						}
+					}
+					continue
+				}
+				appendCountryOffers(&out, countryID, services)
+			}
+		}
+		return out, nil
+	}
 	if arr, ok := root.([]any); ok {
 		for _, v := range arr {
 			if m, ok := v.(map[string]any); ok {
 				for k, vv := range m {
-					appendOffer(&out, k, vv)
+					appendOffer(&out, country, k, vv)
 				}
 			}
 		}
 	}
 	if m, ok := root.(map[string]any); ok {
 		for k, v := range m {
-			appendOffer(&out, k, v)
+			appendOffer(&out, country, k, v)
 		}
 	}
 	return out, nil
 }
-func appendOffer(out *[]Offer, service string, value any) {
+func appendCountryOffers(out *[]Offer, country string, value any) {
+	if services, ok := value.(map[string]any); ok {
+		for service, offer := range services {
+			appendOffer(out, country, service, offer)
+		}
+	}
+}
+func appendOffer(out *[]Offer, country, service string, value any) {
 	if m, ok := value.(map[string]any); ok {
 		cost, _ := number(m["cost"])
 		if cost == 0 {
@@ -172,7 +196,7 @@ func appendOffer(out *[]Offer, service string, value any) {
 		}
 		count, _ := number(m["count"])
 		if cost > 0 {
-			*out = append(*out, Offer{service, cost, int(count)})
+			*out = append(*out, Offer{Service: service, Country: country, Cost: cost, Count: int(count)})
 		}
 	}
 }

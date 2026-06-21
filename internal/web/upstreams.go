@@ -18,6 +18,7 @@ import (
 
 type providerQuote struct {
 	Service         string
+	Country         string
 	Provider        string
 	ProviderCountry string
 	ProviderService string
@@ -37,12 +38,16 @@ type catalogSnapshot struct {
 }
 
 type smsmanCatalogCache struct {
-	mu              sync.Mutex
+	metadataMu      sync.Mutex
+	quoteMu         sync.Mutex
+	globalMu        sync.Mutex
 	metadataExpires time.Time
 	countries       []smsman.Item
 	applications    []smsman.Item
 	quoteExpires    map[int]time.Time
 	quotes          map[int]map[int]smsman.Quote
+	globalExpires   time.Time
+	globalQuotes    map[int]map[int]smsman.Quote
 }
 
 func newSMSManCatalogCache() *smsmanCatalogCache {
@@ -50,8 +55,8 @@ func newSMSManCatalogCache() *smsmanCatalogCache {
 }
 
 func (c *smsmanCatalogCache) metadata(ctx context.Context, client *smsman.Client) ([]smsman.Item, []smsman.Item, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.metadataMu.Lock()
+	defer c.metadataMu.Unlock()
 	if time.Now().Before(c.metadataExpires) && len(c.countries) > 0 && len(c.applications) > 0 {
 		return c.countries, c.applications, nil
 	}
@@ -70,8 +75,8 @@ func (c *smsmanCatalogCache) metadata(ctx context.Context, client *smsman.Client
 }
 
 func (c *smsmanCatalogCache) countryQuotes(ctx context.Context, client *smsman.Client, countryID int) (map[int]smsman.Quote, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.quoteMu.Lock()
+	defer c.quoteMu.Unlock()
 	if time.Now().Before(c.quoteExpires[countryID]) {
 		return c.quotes[countryID], nil
 	}
@@ -84,22 +89,48 @@ func (c *smsmanCatalogCache) countryQuotes(ctx context.Context, client *smsman.C
 	return quotes, nil
 }
 
+func (c *smsmanCatalogCache) allQuotes(ctx context.Context, client *smsman.Client) (map[int]map[int]smsman.Quote, error) {
+	c.globalMu.Lock()
+	defer c.globalMu.Unlock()
+	if time.Now().Before(c.globalExpires) && c.globalQuotes != nil {
+		return c.globalQuotes, nil
+	}
+	quotes, err := client.GlobalQuotes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c.globalQuotes = quotes
+	c.globalExpires = time.Now().Add(30 * time.Second)
+	return quotes, nil
+}
+
 func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapshot, error) {
+	if country == "" {
+		return s.loadGlobalCatalog(ctx)
+	}
 	snapshot := catalogSnapshot{Quotes: map[string]providerQuote{}}
 	livePricing := s.effectivePricing()
 	var heroErr error
 	if s.C.HeroKey != "" {
 		snapshot.Countries, heroErr = s.Hero.Countries(ctx)
-		if heroErr == nil && country != "" {
+		if heroErr == nil {
 			snapshot.Services, heroErr = s.Hero.Services(ctx, country)
 		}
-		if heroErr == nil && country != "" {
+		if heroErr == nil {
 			var offers []hero.Offer
 			offers, heroErr = s.Hero.Offers(ctx, country)
 			if heroErr == nil {
 				for _, offer := range offers {
 					if offer.Count > 0 {
-						snapshot.Quotes[offer.Service] = providerQuote{Service: offer.Service, Provider: "hero", ProviderCountry: country, ProviderService: offer.Service, Cost: offer.Cost, Rate: livePricing.USDCNY, Count: offer.Count}
+						candidateCountry := country
+						if candidateCountry == "" {
+							candidateCountry = offer.Country
+						}
+						candidate := providerQuote{Service: offer.Service, Country: candidateCountry, Provider: "hero", ProviderCountry: candidateCountry, ProviderService: offer.Service, Cost: offer.Cost, Rate: livePricing.USDCNY, Count: offer.Count}
+						current, exists := snapshot.Quotes[offer.Service]
+						if !exists || candidate.priceFen(livePricing.Markup) < current.priceFen(livePricing.Markup) {
+							snapshot.Quotes[offer.Service] = candidate
+						}
 					}
 				}
 			}
@@ -125,17 +156,12 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 			snapshot.Countries = append(snapshot.Countries, hero.Country{ID: countryItem.ID, Eng: countryItem.Name, Chn: countryItem.Name})
 		}
 	}
-	if country == "" {
-		return snapshot, nil
-	}
-
 	if s.C.HeroKey == "" || heroErr != nil {
 		snapshot.Services = nil
 		for _, application := range applications {
 			snapshot.Services = append(snapshot.Services, hero.Service{Code: strconv.Itoa(application.ID), Name: application.Name})
 		}
 	}
-
 	smsCountryID := 0
 	if s.C.HeroKey == "" || heroErr != nil {
 		smsCountryID, _ = strconv.Atoi(country)
@@ -173,7 +199,7 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 		if !ok || quote.Count <= 0 {
 			continue
 		}
-		candidate := providerQuote{Service: service.Code, Provider: "smsman", ProviderCountry: strconv.Itoa(smsCountryID), ProviderService: strconv.Itoa(applicationID), Cost: quote.Price, Rate: livePricing.SMSManCNY, Count: quote.Count}
+		candidate := providerQuote{Service: service.Code, Country: country, Provider: "smsman", ProviderCountry: strconv.Itoa(smsCountryID), ProviderService: strconv.Itoa(applicationID), Cost: quote.Price, Rate: livePricing.SMSManCNY, Count: quote.Count}
 		current, exists := snapshot.Quotes[service.Code]
 		if !exists || candidate.priceFen(livePricing.Markup) < current.priceFen(livePricing.Markup) {
 			snapshot.Quotes[service.Code] = candidate
@@ -183,6 +209,166 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 		return catalogSnapshot{}, heroErr
 	}
 	return snapshot, nil
+}
+
+func (s *Server) loadGlobalCatalog(ctx context.Context) (catalogSnapshot, error) {
+	pricing := s.effectivePricing()
+	var heroCountries []hero.Country
+	var heroServices []hero.Service
+	var heroOffers []hero.Offer
+	var heroErr error
+	var smsCountries, smsApplications []smsman.Item
+	var smsQuotes map[int]map[int]smsman.Quote
+	var smsErr error
+	var providers sync.WaitGroup
+
+	if s.C.HeroKey != "" {
+		providers.Add(1)
+		go func() {
+			defer providers.Done()
+			var calls sync.WaitGroup
+			errors := make(chan error, 3)
+			calls.Add(3)
+			go func() {
+				defer calls.Done()
+				var err error
+				heroCountries, err = s.Hero.Countries(ctx)
+				if err != nil {
+					errors <- err
+				}
+			}()
+			go func() {
+				defer calls.Done()
+				var err error
+				heroServices, err = s.Hero.Services(ctx, "")
+				if err != nil {
+					errors <- err
+				}
+			}()
+			go func() {
+				defer calls.Done()
+				var err error
+				heroOffers, err = s.Hero.Offers(ctx, "")
+				if err != nil {
+					errors <- err
+				}
+			}()
+			calls.Wait()
+			close(errors)
+			for err := range errors {
+				if heroErr == nil {
+					heroErr = err
+				}
+			}
+		}()
+	} else {
+		heroErr = errors.New("HeroSMS is not configured")
+	}
+	if s.C.SMSManToken != "" {
+		providers.Add(1)
+		go func() {
+			defer providers.Done()
+			var calls sync.WaitGroup
+			errors := make(chan error, 2)
+			calls.Add(2)
+			go func() {
+				defer calls.Done()
+				var err error
+				smsCountries, smsApplications, err = s.SMSCache.metadata(ctx, s.SMSMan)
+				if err != nil {
+					errors <- err
+				}
+			}()
+			go func() {
+				defer calls.Done()
+				var err error
+				smsQuotes, err = s.SMSCache.allQuotes(ctx, s.SMSMan)
+				if err != nil {
+					errors <- err
+				}
+			}()
+			calls.Wait()
+			close(errors)
+			for err := range errors {
+				if smsErr == nil {
+					smsErr = err
+				}
+			}
+		}()
+	} else {
+		smsErr = errors.New("SMS-Man is not configured")
+	}
+	providers.Wait()
+
+	snapshot := catalogSnapshot{Quotes: map[string]providerQuote{}}
+	if heroErr == nil {
+		snapshot.Countries, snapshot.Services = heroCountries, heroServices
+		for _, offer := range heroOffers {
+			if offer.Count <= 0 {
+				continue
+			}
+			candidate := providerQuote{Service: offer.Service, Country: offer.Country, Provider: "hero", ProviderCountry: offer.Country, ProviderService: offer.Service, Cost: offer.Cost, Rate: pricing.USDCNY, Count: offer.Count}
+			current, exists := snapshot.Quotes[offer.Service]
+			if !exists || candidate.priceFen(pricing.Markup) < current.priceFen(pricing.Markup) {
+				snapshot.Quotes[offer.Service] = candidate
+			}
+		}
+	} else if smsErr == nil {
+		for _, item := range smsCountries {
+			snapshot.Countries = append(snapshot.Countries, hero.Country{ID: item.ID, Eng: item.Name, Chn: item.Name})
+		}
+		for _, item := range smsApplications {
+			snapshot.Services = append(snapshot.Services, hero.Service{Code: strconv.Itoa(item.ID), Name: item.Name})
+		}
+	}
+	if smsErr == nil {
+		for smsCountryID, quotes := range smsQuotes {
+			canonicalCountry := strconv.Itoa(smsCountryID)
+			if heroErr == nil {
+				name := ""
+				for _, item := range smsCountries {
+					if item.ID == smsCountryID {
+						name = item.Name
+						break
+					}
+				}
+				if id := matchingHeroCountryID(snapshot.Countries, name); id > 0 {
+					canonicalCountry = strconv.Itoa(id)
+				}
+			}
+			for _, service := range snapshot.Services {
+				applicationID := 0
+				if heroErr == nil {
+					applicationID = matchingItemID(smsApplications, service.Name)
+				} else {
+					applicationID, _ = strconv.Atoi(service.Code)
+				}
+				quote, ok := quotes[applicationID]
+				if !ok || quote.Count <= 0 {
+					continue
+				}
+				candidate := providerQuote{Service: service.Code, Country: canonicalCountry, Provider: "smsman", ProviderCountry: strconv.Itoa(smsCountryID), ProviderService: strconv.Itoa(applicationID), Cost: quote.Price, Rate: pricing.SMSManCNY, Count: quote.Count}
+				current, exists := snapshot.Quotes[service.Code]
+				if !exists || candidate.priceFen(pricing.Markup) < current.priceFen(pricing.Markup) {
+					snapshot.Quotes[service.Code] = candidate
+				}
+			}
+		}
+	}
+	if heroErr != nil && smsErr != nil {
+		return catalogSnapshot{}, fmt.Errorf("catalog providers unavailable: %v; %v", heroErr, smsErr)
+	}
+	return snapshot, nil
+}
+
+func matchingHeroCountryID(items []hero.Country, name string) int {
+	wanted := normalizedName(name)
+	for _, item := range items {
+		if normalizedName(item.Eng) == wanted || normalizedName(item.Chn) == wanted {
+			return item.ID
+		}
+	}
+	return 0
 }
 
 func matchingItemID(items []smsman.Item, name string) int {

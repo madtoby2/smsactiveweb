@@ -82,6 +82,17 @@ func TestQuotesParsesNestedLimitPayloads(t *testing.T) {
 	}
 }
 
+func TestGlobalQuotesPreserveCountryAndApplication(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"2":{"1":{"price":"12.5","count":"3"}},"7":{"1":{"cost":8,"count":2},"9":{"price":4,"count":1}}}`))
+	}))
+	defer server.Close()
+	quotes, err := New("secret", server.URL).GlobalQuotes(context.Background())
+	if err != nil || quotes[2][1].Price != 12.5 || quotes[7][1].Price != 8 || quotes[7][9].Price != 4 {
+		t.Fatalf("quotes=%v err=%v", quotes, err)
+	}
+}
+
 func TestRejectRequiresExplicitSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"success":false}`))
