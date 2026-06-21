@@ -125,9 +125,99 @@
 .order-service { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .order-service > span:last-child { min-width: 0; }
 .order-service b { overflow: hidden; text-overflow: ellipsis; }
+.order-phone { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.phone-pill {
+  max-width: 190px;
+  padding: 7px 10px;
+  border: 1px solid #bcd0ff;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #edf4ff, #ffffff);
+  color: #0f2a56;
+  font-size: 16px;
+  font-weight: 900;
+  letter-spacing: .035em;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 8px 20px #2762ff12;
+}
+.phone-pill:hover { border-color: #2762ff; color: #1e5dff; }
+.copy-phone {
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 9px;
+  padding: 7px 9px;
+  background: #2862ff;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+}
+.phone-modal {
+  position: fixed;
+  z-index: 110;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  background: rgba(13, 31, 61, .45);
+  backdrop-filter: blur(8px);
+}
+.phone-card {
+  position: relative;
+  width: min(440px, 100%);
+  padding: 30px;
+  border: 1px solid rgba(255,255,255,.72);
+  border-radius: 28px;
+  background: #fff;
+  box-shadow: 0 32px 90px rgba(14,40,85,.28);
+  text-align: center;
+}
+.phone-card h2 { margin: 5px 0 8px; font-size: 28px; }
+.phone-meta { margin: 0 0 18px; color: #718096; }
+.phone-large {
+  display: block;
+  margin: 16px 0 22px;
+  padding: 18px 14px;
+  border: 1px solid #dbe6ff;
+  border-radius: 18px;
+  background: linear-gradient(135deg, #eef5ff, #f9fbff);
+  color: #10284d;
+  font-size: clamp(28px, 7vw, 40px);
+  line-height: 1.1;
+  letter-spacing: .04em;
+  word-break: break-all;
+}
+.phone-close {
+  position: absolute;
+  right: 18px;
+  top: 14px;
+  width: 36px;
+  height: 36px;
+  border: 1px solid #dce6f4;
+  border-radius: 12px;
+  background: #fff;
+  color: #526783;
+  font-size: 24px;
+  cursor: pointer;
+}
+.phone-actions { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; }
+.phone-actions .primary { width: 100%; }
+.phone-secondary {
+  border: 0;
+  border-radius: 11px;
+  padding: 13px 18px;
+  background: #eef4ff;
+  color: #2762ff;
+  font-weight: 750;
+  cursor: pointer;
+}
 .country-hint { display: block; margin-top: 7px; color: #8290a6; font-size: 11px; font-weight: 500; }
 @media(max-width: 800px) {
   .purchase-highlight { grid-template-columns: auto 1fr; margin-top: -4px; padding: 16px; }
   .purchase-benefits { grid-column: 1 / -1; justify-content: flex-start; }
   .service-list { height: 240px; }
+  .order-phone { flex-wrap: wrap; }
+  .phone-pill { max-width: 100%; }
+  .phone-actions { grid-template-columns: 1fr; }
 }

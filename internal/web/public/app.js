@@ -18,6 +18,52 @@ function toast(message) {
 function escapeHTML(value) {
   return String(value ?? '').replace(/[&<>'"]/g, char => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'}[char]));
 }
+function orderPhoneKey(order) { return `${order.ID}:${order.Phone}`; }
+function activePhoneOrder(order) { return order.Phone && ['waiting', 'replacing', 'code_received'].includes(order.Status); }
+function notifiedPhoneKeys() {
+  try { return new Set(JSON.parse(localStorage.getItem('phoneNotified') || '[]')); } catch { return new Set(); }
+}
+function saveNotifiedPhoneKeys(keys) {
+  localStorage.setItem('phoneNotified', JSON.stringify([...keys].slice(-120)));
+}
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const input = document.createElement('textarea');
+  input.value = text;
+  input.setAttribute('readonly', '');
+  input.style.position = 'fixed';
+  input.style.left = '-9999px';
+  document.body.appendChild(input);
+  input.select();
+  document.execCommand('copy');
+  input.remove();
+}
+function showPhoneModal(order) {
+  if (!order?.Phone) return;
+  $('#phoneModalMeta').textContent = `${order.Service} · 国家 ${order.Country}`;
+  $('#phoneModalNumber').textContent = order.Phone;
+  $('#phoneModalCopy').onclick = async () => {
+    try {
+      await copyText(order.Phone);
+      toast('号码已复制');
+    } catch {
+      toast('复制失败，请手动复制');
+    }
+  };
+  $('#phoneModal').classList.remove('hidden');
+}
+function closePhoneModal() { $('#phoneModal').classList.add('hidden'); }
+function maybeShowNewPhoneModal() {
+  const keys = notifiedPhoneKeys();
+  const order = state.orders.find(item => activePhoneOrder(item) && !keys.has(orderPhoneKey(item)));
+  if (!order) return;
+  keys.add(orderPhoneKey(order));
+  saveNotifiedPhoneKeys(keys);
+  showPhoneModal(order);
+}
 
 function serviceIcon(code, name = '') {
   const key = `${code} ${name}`.toLowerCase();
@@ -323,8 +369,21 @@ function renderOrders() {
     box.innerHTML = '<div class="empty">还没有订单。选一个服务开始吧。</div>';
     return;
   }
-  box.innerHTML = state.orders.map(order => `<article class="order"><div class="order-service">${serviceIcon(order.Service)}<span><b>${escapeHTML(order.Phone || order.Service)}</b><small>国家 ${escapeHTML(order.Country)}${order.ReplaceAttempts ? ` · 已换号 ${order.ReplaceAttempts} 次` : ''}</small></span></div><div><span class="badge">${status(order.Status)}</span><small>${new Date(order.CreatedAt).toLocaleString()}</small></div><div>${order.Code ? `<code>${escapeHTML(order.Code)}</code>` : '<small>等待验证码</small>'}<b>${money(order.PriceFen)}</b></div><div><button class="link refresh-one" data-id="${order.ID}">刷新</button></div></article>`).join('');
+  box.innerHTML = state.orders.map(order => {
+    const phone = order.Phone ? `<button class="phone-pill show-phone" type="button" data-id="${order.ID}" title="点击查看号码">${escapeHTML(order.Phone)}</button><button class="copy-phone" type="button" data-phone="${escapeHTML(order.Phone)}">复制</button>` : `<b>${escapeHTML(order.Service)}</b>`;
+    return `<article class="order"><div class="order-service">${serviceIcon(order.Service)}<span><span class="${order.Phone ? 'order-phone' : ''}">${phone}</span><small>国家 ${escapeHTML(order.Country)}${order.ReplaceAttempts ? ` · 已换号 ${order.ReplaceAttempts} 次` : ''}</small></span></div><div><span class="badge">${status(order.Status)}</span><small>${new Date(order.CreatedAt).toLocaleString()}</small></div><div>${order.Code ? `<code>${escapeHTML(order.Code)}</code>` : '<small>等待验证码</small>'}<b>${money(order.PriceFen)}</b></div><div><button class="link refresh-one" data-id="${order.ID}">刷新</button></div></article>`;
+  }).join('');
   document.querySelectorAll('.refresh-one').forEach(button => button.onclick = () => refreshOrder(button.dataset.id));
+  document.querySelectorAll('.show-phone').forEach(button => button.onclick = () => showPhoneModal(state.orders.find(order => String(order.ID) === button.dataset.id)));
+  document.querySelectorAll('.copy-phone').forEach(button => button.onclick = async () => {
+    try {
+      await copyText(button.dataset.phone);
+      toast('号码已复制');
+    } catch {
+      toast('复制失败，请手动复制');
+    }
+  });
+  maybeShowNewPhoneModal();
 }
 function status(value) {
   return ({awaiting_payment: '等待支付', payment_failed: '支付创建失败', paid: '支付成功，等待取号', purchasing: '正在取号', waiting: '等待短信', replacing: '正在取消并换号', code_received: '已收到', cancelled: '已取消', purchase_failed: '历史取号失败', replace_failed: '历史换号失败', finished: '已完成'})[value] || value;
@@ -352,6 +411,9 @@ async function pollOrder(id) {
   toast('支付或取号仍在处理中，请在订单列表继续查看');
 }
 $('#refresh').onclick = loadOrders;
+$('#phoneModalClose').onclick = closePhoneModal;
+$('#phoneModalOk').onclick = closePhoneModal;
+$('#phoneModal').onclick = event => { if (event.target === $('#phoneModal')) closePhoneModal(); };
 setInterval(() => {
   if (!$('#app').classList.contains('hidden') && state.orders.some(order => ['paid', 'purchasing', 'waiting', 'replacing'].includes(order.Status))) loadOrders().catch(() => {});
 }, 5000);
