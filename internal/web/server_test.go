@@ -331,6 +331,54 @@ func TestAdminOverviewSettingsAndSupportFlow(t *testing.T) {
 	}
 }
 
+func TestAdminCanConfigureSMTPWithoutReadingPasswordBack(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "smtp-settings.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := config.Config{TurnstileSiteKey: "site-key", TurnstileSecret: "secret", SMTPPort: 587}
+	handler := New(cfg, db).Routes()
+	token, _ := store.Token()
+	if err = db.CreateAdminSession(token); err != nil {
+		t.Fatal(err)
+	}
+	cookie := &http.Cookie{Name: "admin_session", Value: token}
+
+	update := httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(`{"smtpHost":"smtp.example.com","smtpPort":"465","smtpUser":"mailer@example.com","smtpPassword":"smtp-secret-value","smtpFrom":"云码台 <no-reply@example.com>","emailVerificationRequired":"true"}`))
+	update.Header.Set("content-type", "application/json")
+	update.AddCookie(cookie)
+	result := httptest.NewRecorder()
+	handler.ServeHTTP(result, update)
+	if result.Code != http.StatusOK {
+		t.Fatalf("SMTP settings status=%d body=%s", result.Code, result.Body.String())
+	}
+	if strings.Contains(result.Body.String(), "smtp-secret-value") || !strings.Contains(result.Body.String(), `"smtpPasswordConfigured":true`) {
+		t.Fatalf("SMTP password leaked or status missing: %s", result.Body.String())
+	}
+	values, err := db.Settings()
+	if err != nil || values["smtpPassword"] != "smtp-secret-value" {
+		t.Fatalf("SMTP password was not stored: err=%v configured=%v", err, values["smtpPassword"] != "")
+	}
+
+	configRequest := httptest.NewRequest(http.MethodGet, "/api/auth/config", nil)
+	configResult := httptest.NewRecorder()
+	handler.ServeHTTP(configResult, configRequest)
+	if configResult.Code != http.StatusOK || !strings.Contains(configResult.Body.String(), `"emailVerificationRequired":true`) {
+		t.Fatalf("auth config did not update immediately: %s", configResult.Body.String())
+	}
+
+	unchanged := httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(`{"smtpHost":"smtp2.example.com","smtpPort":"587","smtpUser":"mailer@example.com","smtpPassword":"","smtpFrom":"no-reply@example.com","emailVerificationRequired":"true"}`))
+	unchanged.Header.Set("content-type", "application/json")
+	unchanged.AddCookie(cookie)
+	unchangedResult := httptest.NewRecorder()
+	handler.ServeHTTP(unchangedResult, unchanged)
+	values, _ = db.Settings()
+	if unchangedResult.Code != http.StatusOK || values["smtpPassword"] != "smtp-secret-value" {
+		t.Fatalf("blank SMTP password unexpectedly replaced the saved password")
+	}
+}
+
 func TestAutoReplaceDoesNotAcquireWithoutCancellationConfirmation(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "cancel-confirmation.db"))
 	if err != nil {

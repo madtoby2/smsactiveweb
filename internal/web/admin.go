@@ -3,7 +3,9 @@ package web
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"fmt"
 	"net/http"
+	netmail "net/mail"
 	"net/url"
 	"sort"
 	"strconv"
@@ -14,16 +16,85 @@ import (
 )
 
 var settingKeys = map[string]bool{
-	"contactTitle":  true,
-	"contactValue":  true,
-	"contactURL":    true,
-	"supportHours":  true,
-	"markupCNY":     true,
-	"usdCnyRate":    true,
-	"smsmanCnyRate": true,
+	"contactTitle":              true,
+	"contactValue":              true,
+	"contactURL":                true,
+	"supportHours":              true,
+	"markupCNY":                 true,
+	"usdCnyRate":                true,
+	"smsmanCnyRate":             true,
+	"smtpHost":                  true,
+	"smtpPort":                  true,
+	"smtpUser":                  true,
+	"smtpPassword":              true,
+	"smtpFrom":                  true,
+	"emailVerificationRequired": true,
 }
 
 type livePricing struct{ Markup, USDCNY, SMSManCNY float64 }
+
+type emailVerificationSettings struct {
+	Enabled        bool
+	SMTPHost       string
+	SMTPPort       int
+	SMTPUser       string
+	SMTPPassword   string
+	SMTPFrom       string
+	SMTPOverridden bool
+}
+
+func (s *Server) effectiveEmailVerification() emailVerificationSettings {
+	settings := emailVerificationSettings{
+		Enabled: s.C.EmailVerificationRequired, SMTPHost: s.C.SMTPHost, SMTPPort: s.C.SMTPPort,
+		SMTPUser: s.C.SMTPUser, SMTPPassword: s.C.SMTPPassword, SMTPFrom: s.C.SMTPFrom,
+	}
+	if settings.SMTPPort <= 0 {
+		settings.SMTPPort = 587
+	}
+	values, err := s.Store.Settings()
+	if err != nil {
+		return settings
+	}
+	if value, ok := values["emailVerificationRequired"]; ok {
+		settings.Enabled = value == "true"
+	}
+	for key, target := range map[string]*string{"smtpHost": &settings.SMTPHost, "smtpUser": &settings.SMTPUser, "smtpPassword": &settings.SMTPPassword, "smtpFrom": &settings.SMTPFrom} {
+		if value, ok := values[key]; ok {
+			*target = value
+			settings.SMTPOverridden = true
+		}
+	}
+	if value, ok := values["smtpPort"]; ok {
+		if port, parseErr := strconv.Atoi(value); parseErr == nil {
+			settings.SMTPPort = port
+		}
+		settings.SMTPOverridden = true
+	}
+	return settings
+}
+
+func validateEmailVerificationSettings(settings emailVerificationSettings, turnstileReady bool) error {
+	if settings.SMTPPort < 1 || settings.SMTPPort > 65535 {
+		return fmt.Errorf("smtpPort must be between 1 and 65535")
+	}
+	if settings.SMTPHost != "" && (strings.Contains(settings.SMTPHost, "://") || strings.ContainsAny(settings.SMTPHost, " /\\")) {
+		return fmt.Errorf("smtpHost must be a hostname")
+	}
+	if settings.SMTPFrom != "" {
+		if _, err := netmail.ParseAddress(settings.SMTPFrom); err != nil {
+			return fmt.Errorf("smtpFrom must be a valid email address")
+		}
+	}
+	if settings.Enabled {
+		if settings.SMTPHost == "" || settings.SMTPFrom == "" {
+			return fmt.Errorf("SMTP host and sender are required before enabling email verification")
+		}
+		if !turnstileReady {
+			return fmt.Errorf("Cloudflare Turnstile must be configured before enabling email verification")
+		}
+	}
+	return nil
+}
 
 func (s *Server) effectivePricing() livePricing {
 	pricing := livePricing{Markup: s.C.Markup, USDCNY: s.C.USDCNY, SMSManCNY: s.C.SMSManCNYRate}
@@ -151,7 +222,14 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	out["markupCNY"] = strconv.FormatFloat(pricing.Markup, 'f', -1, 64)
 	out["usdCnyRate"] = strconv.FormatFloat(pricing.USDCNY, 'f', -1, 64)
 	out["smsmanCnyRate"] = strconv.FormatFloat(pricing.SMSManCNY, 'f', -1, 64)
-	jsonOut(w, 200, out)
+	email := s.effectiveEmailVerification()
+	out["smtpHost"] = email.SMTPHost
+	out["smtpPort"] = strconv.Itoa(email.SMTPPort)
+	out["smtpUser"] = email.SMTPUser
+	out["smtpFrom"] = email.SMTPFrom
+	out["smtpPassword"] = ""
+	out["emailVerificationRequired"] = strconv.FormatBool(email.Enabled)
+	jsonOut(w, 200, map[string]any{"settings": out, "smtpPasswordConfigured": email.SMTPPassword != "", "turnstileConfigured": s.C.TurnstileSiteKey != "" && s.C.TurnstileSecret != ""})
 }
 
 func (s *Server) updateAdminSettings(w http.ResponseWriter, r *http.Request) {
@@ -185,7 +263,44 @@ func (s *Server) updateAdminSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if key == "smtpPort" {
+			port, err := strconv.Atoi(value)
+			if err != nil || port < 1 || port > 65535 {
+				fail(w, 400, "smtpPort must be between 1 and 65535")
+				return
+			}
+		}
+		if key == "emailVerificationRequired" && value != "true" && value != "false" {
+			fail(w, 400, "emailVerificationRequired must be true or false")
+			return
+		}
+		if key == "smtpPassword" && value == "" {
+			continue
+		}
 		clean[key] = value
+	}
+	current := s.effectiveEmailVerification()
+	if value, ok := clean["emailVerificationRequired"]; ok {
+		current.Enabled = value == "true"
+	}
+	if value, ok := clean["smtpHost"]; ok {
+		current.SMTPHost = value
+	}
+	if value, ok := clean["smtpUser"]; ok {
+		current.SMTPUser = value
+	}
+	if value, ok := clean["smtpPassword"]; ok {
+		current.SMTPPassword = value
+	}
+	if value, ok := clean["smtpFrom"]; ok {
+		current.SMTPFrom = value
+	}
+	if value, ok := clean["smtpPort"]; ok {
+		current.SMTPPort, _ = strconv.Atoi(value)
+	}
+	if err := validateEmailVerificationSettings(current, s.C.TurnstileSiteKey != "" && s.C.TurnstileSecret != ""); err != nil {
+		fail(w, 400, err)
+		return
 	}
 	if err := s.Store.UpdateSettings(clean); err != nil {
 		fail(w, 500, err)

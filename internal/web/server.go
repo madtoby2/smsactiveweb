@@ -159,7 +159,8 @@ func setSession(w http.ResponseWriter, token string, secure bool) {
 	http.SetCookie(w, &http.Cookie{Name: "session", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: secure, MaxAge: 30 * 86400})
 }
 func (s *Server) authConfig(w http.ResponseWriter, r *http.Request) {
-	jsonOut(w, 200, map[string]any{"emailVerificationRequired": s.C.EmailVerificationRequired, "turnstileSiteKey": s.C.TurnstileSiteKey})
+	email := s.effectiveEmailVerification()
+	jsonOut(w, 200, map[string]any{"emailVerificationRequired": email.Enabled, "turnstileSiteKey": s.C.TurnstileSiteKey})
 }
 
 func normalizedEmail(value string) (string, error) {
@@ -195,7 +196,8 @@ func verificationCode() (string, error) {
 }
 
 func (s *Server) sendEmailCode(w http.ResponseWriter, r *http.Request) {
-	if !s.C.EmailVerificationRequired {
+	emailSettings := s.effectiveEmailVerification()
+	if !emailSettings.Enabled {
 		fail(w, http.StatusServiceUnavailable, "邮箱验证尚未启用")
 		return
 	}
@@ -225,7 +227,11 @@ func (s *Server) sendEmailCode(w http.ResponseWriter, r *http.Request) {
 		fail(w, 429, err)
 		return
 	}
-	if err = s.Mailer.SendVerification(r.Context(), email, code); err != nil {
+	sender := s.Mailer
+	if emailSettings.SMTPOverridden {
+		sender = &mailer.SMTP{Host: emailSettings.SMTPHost, Port: emailSettings.SMTPPort, User: emailSettings.SMTPUser, Password: emailSettings.SMTPPassword, From: emailSettings.SMTPFrom}
+	}
+	if err = sender.SendVerification(r.Context(), email, code); err != nil {
 		s.Store.DeleteEmailVerification(email)
 		log.Printf("verification email delivery failed for %s: %v", email, err)
 		fail(w, 502, "验证码邮件发送失败，请稍后重试")
@@ -248,7 +254,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	}
 	var u store.User
 	var t string
-	if s.C.EmailVerificationRequired {
+	if s.effectiveEmailVerification().Enabled {
 		if len(in.Code) != 6 {
 			fail(w, 400, "请输入 6 位邮箱验证码")
 			return
