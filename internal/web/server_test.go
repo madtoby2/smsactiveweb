@@ -404,6 +404,58 @@ func TestAuthenticatedRequestRefreshesPersistentSessionCookie(t *testing.T) {
 	}
 }
 
+func TestProfileReturnsCurrentUserSummaryAndOrderHistory(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "profile.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, token, err := db.Register("profile@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	order := store.SMSOrder{ID: "profile-order", Country: "6", Service: "tg", PriceFen: 250, CreatedAt: now}
+	payment := store.Recharge{ID: "profile-payment", AmountFen: 250, Provider: "sandbox", PayType: "2", Token: "token", CreatedAt: now}
+	if err = db.CreateSMSPayment(user, order, payment); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.CompleteSMSPayment(payment.ID, "provider-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.UpdateSMS(order.ID, "code_received", "123456"); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := New(config.Config{}, db).Routes()
+	request := httptest.NewRequest(http.MethodGet, "/api/profile", nil)
+	request.AddCookie(&http.Cookie{Name: "session", Value: token})
+	result := httptest.NewRecorder()
+	handler.ServeHTTP(result, request)
+	if result.Code != http.StatusOK {
+		t.Fatalf("profile status=%d body=%s", result.Code, result.Body.String())
+	}
+	var response struct {
+		Profile store.UserProfile `json:"profile"`
+		Orders  []store.SMSOrder  `json:"orders"`
+	}
+	if err = json.Unmarshal(result.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Profile.Email != "profile@example.com" || response.Profile.OrdersTotal != 1 || response.Profile.OrdersSuccessful != 1 || response.Profile.SpentFen != 250 {
+		t.Fatalf("unexpected profile: %+v", response.Profile)
+	}
+	if len(response.Orders) != 1 || response.Orders[0].ID != order.ID {
+		t.Fatalf("unexpected order history: %+v", response.Orders)
+	}
+
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/api/profile", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized profile status=%d", unauthorized.Code)
+	}
+}
+
 func TestPayForSMSOrderThenAcquireEndToEnd(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "flow.db"))
 	if err != nil {

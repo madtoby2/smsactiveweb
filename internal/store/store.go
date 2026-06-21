@@ -20,6 +20,15 @@ type User struct {
 	Balance  int64  `json:"balanceFen"`
 	Disabled bool   `json:"disabled,omitempty"`
 }
+type UserProfile struct {
+	ID               int64  `json:"id"`
+	Email            string `json:"email"`
+	BalanceFen       int64  `json:"balanceFen"`
+	CreatedAt        string `json:"createdAt"`
+	OrdersTotal      int64  `json:"ordersTotal"`
+	OrdersSuccessful int64  `json:"ordersSuccessful"`
+	SpentFen         int64  `json:"spentFen"`
+}
 type SMSOrder struct {
 	ID               string `json:"id"`
 	UserID           int64  `json:"-"`
@@ -567,6 +576,20 @@ func (s *Store) ListSMS(uid int64) ([]SMSOrder, error) {
 		out = append(out, o)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) UserProfile(uid int64) (UserProfile, error) {
+	var profile UserProfile
+	err := s.DB.QueryRow(`
+		SELECT u.id, u.email, u.balance_fen, u.created_at,
+			(SELECT COUNT(*) FROM sms_orders o WHERE o.user_id=u.id),
+			(SELECT COUNT(*) FROM sms_orders o WHERE o.user_id=u.id AND o.status='code_received'),
+			COALESCE((SELECT SUM(r.amount_fen) FROM recharges r WHERE r.user_id=u.id AND r.status='paid' AND COALESCE(r.reference,'')<>''), 0)
+		FROM users u WHERE u.id=?`, uid).Scan(
+		&profile.ID, &profile.Email, &profile.BalanceFen, &profile.CreatedAt,
+		&profile.OrdersTotal, &profile.OrdersSuccessful, &profile.SpentFen,
+	)
+	return profile, err
 }
 
 func (s *Store) ListPaidSMS(limit int) ([]SMSOrder, error) {

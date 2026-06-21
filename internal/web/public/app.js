@@ -1,5 +1,5 @@
 const $ = selector => document.querySelector(selector);
-const state = {register: false, offers: [], services: [], orders: [], selectedService: '', liveSmsPurchaseEnabled: false, authConfig: {emailVerificationRequired: false, turnstileSiteKey: ''}, turnstileWidget: null};
+const state = {register: false, user: null, offers: [], services: [], orders: [], selectedService: '', liveSmsPurchaseEnabled: false, authConfig: {emailVerificationRequired: false, turnstileSiteKey: ''}, turnstileWidget: null};
 
 async function api(path, options = {}) {
   const response = await fetch(path, {headers: {'content-type': 'application/json'}, ...options});
@@ -112,15 +112,26 @@ async function loadAnnouncements() {
 }
 
 function showApp(data) {
+  state.user = data.user;
   state.liveSmsPurchaseEnabled = Boolean(data.liveSmsPurchaseEnabled);
   $('#auth').classList.add('hidden');
   $('#app').classList.remove('hidden');
-  $('#logout').classList.remove('hidden');
+  const email = data.user?.email || '账户';
+  const initials = accountInitials(email);
+  $('#accountEmail').textContent = email;
+  $('#accountAvatar').textContent = initials;
+  $('#profileAvatar').textContent = initials;
+  $('#accountNav').classList.remove('hidden');
   $('#supportOpen').classList.remove('hidden');
   if (!state.liveSmsPurchaseEnabled) {
     $('#buy').textContent = '支付取号演示模式';
     $('#stock').textContent = '演示环境暂不分配真实号码';
   }
+}
+
+function accountInitials(email) {
+  const prefix = String(email || 'U').split('@')[0];
+  return (prefix.match(/[a-z0-9]/gi) || ['U']).slice(0, 2).join('').toUpperCase();
 }
 
 let supportTimer;
@@ -204,6 +215,52 @@ $('#authForm').onsubmit = async event => {
   }
 };
 $('#logout').onclick = async () => { await api('/api/auth/logout', {method: 'POST'}); location.reload(); };
+
+$('#accountButton').onclick = event => {
+  event.stopPropagation();
+  const dropdown = $('#accountDropdown');
+  const opening = dropdown.classList.contains('hidden');
+  dropdown.classList.toggle('hidden', !opening);
+  $('#accountButton').setAttribute('aria-expanded', String(opening));
+};
+document.addEventListener('click', event => {
+  if (!$('#accountNav').contains(event.target)) {
+    $('#accountDropdown').classList.add('hidden');
+    $('#accountButton').setAttribute('aria-expanded', 'false');
+  }
+});
+
+$('#openProfile').onclick = async () => {
+  $('#accountDropdown').classList.add('hidden');
+  $('#accountButton').setAttribute('aria-expanded', 'false');
+  $('#profileModal').classList.remove('hidden');
+  $('#profileOrderRows').innerHTML = '<p class="profile-loading">正在加载...</p>';
+  try {
+    const data = await api('/api/profile');
+    renderProfile(data);
+  } catch (error) {
+    $('#profileOrderRows').innerHTML = `<p class="profile-empty">${escapeHTML(error.message)}</p>`;
+  }
+};
+
+function renderProfile(data) {
+  const profile = data.profile;
+  $('#profileEmail').textContent = profile.email;
+  $('#profileAvatar').textContent = accountInitials(profile.email);
+  $('#profileID').textContent = `用户编号 #${profile.id}`;
+  $('#profileCreatedAt').textContent = `注册于 ${new Date(profile.createdAt).toLocaleDateString()}`;
+  $('#profileOrdersTotal').textContent = profile.ordersTotal;
+  $('#profileOrdersSuccessful').textContent = profile.ordersSuccessful;
+  $('#profileSpent').textContent = money(profile.spentFen);
+  $('#profileBalance').textContent = money(profile.balanceFen);
+  const rows = data.orders || [];
+  $('#profileOrderRows').innerHTML = rows.length ? rows.map(order => `<div class="profile-order-row"><span><b>${escapeHTML(order.Service)}</b><small>国家 ${escapeHTML(order.Country)} · ${escapeHTML(order.Phone || '待分配')}</small></span><span class="order-status">${escapeHTML(status(order.Status))}</span><span>${new Date(order.CreatedAt).toLocaleString()}</span><strong>${money(order.PriceFen)}</strong></div>`).join('') : '<p class="profile-empty">暂无历史订单</p>';
+}
+
+function closeProfile() { $('#profileModal').classList.add('hidden'); }
+$('#profileClose').onclick = closeProfile;
+$('#profileModal').onclick = event => { if (event.target === $('#profileModal')) closeProfile(); };
+document.addEventListener('keydown', event => { if (event.key === 'Escape') closeProfile(); });
 
 async function loadCatalog() {
   const data = await api('/api/catalog');

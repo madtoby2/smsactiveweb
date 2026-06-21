@@ -74,6 +74,7 @@ func (s *Server) Routes() http.Handler {
 	m.HandleFunc("POST /api/auth/login", s.login)
 	m.HandleFunc("POST /api/auth/logout", s.logout)
 	m.HandleFunc("GET /api/me", s.auth(s.me))
+	m.HandleFunc("GET /api/profile", s.auth(s.profile))
 	m.HandleFunc("GET /api/catalog", s.auth(s.catalog))
 	m.HandleFunc("GET /api/orders", s.auth(s.orders))
 	m.HandleFunc("POST /api/orders", s.auth(s.purchase))
@@ -288,6 +289,20 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request, u store.User) {
 	liveSMSPurchaseEnabled := s.C.PayProvider != "sandbox" || s.C.AllowLiveSMSInSandbox
 	pricing := s.effectivePricing()
 	jsonOut(w, 200, map[string]any{"user": u, "pricing": map[string]any{"markupCNY": pricing.Markup, "usdCnyRate": pricing.USDCNY}, "paymentProvider": s.C.PayProvider, "liveSmsPurchaseEnabled": liveSMSPurchaseEnabled, "autoReplaceMax": s.C.AutoReplaceMax})
+}
+
+func (s *Server) profile(w http.ResponseWriter, r *http.Request, u store.User) {
+	profile, err := s.Store.UserProfile(u.ID)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	orders, err := s.Store.ListSMS(u.ID)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"profile": profile, "orders": orders})
 }
 
 func (s *Server) catalog(w http.ResponseWriter, r *http.Request, u store.User) {

@@ -21,10 +21,11 @@
   <link rel="stylesheet" href="/footer.css">
   <link rel="stylesheet" href="/support.css">
   <link rel="stylesheet" href="/announcement.css">
+  <link rel="stylesheet" href="/profile.css">
 </head>
 <body>
   <div class="glow one"></div><div class="glow two"></div>
-  <header><a class="brand" href="/"><span>Y</span> 云码台</a><nav><button id="logout" class="link hidden">退出</button></nav></header>
+  <header><a class="brand" href="/"><span>Y</span> 云码台</a><nav id="accountNav" class="account-nav hidden"><button id="accountButton" class="account-button" type="button" aria-expanded="false"><span id="accountAvatar" class="account-avatar">U</span><span class="account-copy"><b id="accountEmail">账户</b><small>个人中心</small></span><span class="account-chevron" aria-hidden="true">⌄</span></button><div id="accountDropdown" class="account-dropdown hidden"><button id="openProfile" type="button">个人中心</button><button id="logout" type="button">退出登录</button></div></nav></header>
   <section id="announcementBanner" class="announcement-banner hidden"></section>
   <main>
     <section id="auth" class="auth-grid">
@@ -41,6 +42,15 @@
       </div>
     </section>
   </main>
+
+  <div id="profileModal" class="profile-modal hidden" role="dialog" aria-modal="true" aria-labelledby="profileTitle">
+    <section class="profile-shell">
+      <div class="profile-heading"><div><p class="eyebrow">ACCOUNT</p><h2 id="profileTitle">个人中心</h2></div><button id="profileClose" class="profile-close" type="button" aria-label="关闭">×</button></div>
+      <div class="profile-identity"><span id="profileAvatar" class="profile-avatar">U</span><div><strong id="profileEmail">-</strong><small><span id="profileID">用户编号 -</span> · <span id="profileCreatedAt">注册时间 -</span></small></div></div>
+      <div class="profile-stats"><article><span>历史订单</span><strong id="profileOrdersTotal">0</strong></article><article><span>成功接码</span><strong id="profileOrdersSuccessful">0</strong></article><article><span>累计支付</span><strong id="profileSpent">¥0.00</strong></article><article><span>账户余额</span><strong id="profileBalance">¥0.00</strong></article></div>
+      <section class="profile-history"><div class="profile-history-title"><div><h3>历史订单</h3><p>展示最近 100 条订单记录</p></div></div><div class="profile-order-table"><div class="profile-order-head"><span>服务 / 国家</span><span>状态</span><span>下单时间</span><span>金额</span></div><div id="profileOrderRows"><p class="profile-loading">正在加载...</p></div></div></section>
+    </section>
+  </div>
 
   <footer class="site-footer">
     <div class="footer-inner">
