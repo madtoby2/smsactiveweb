@@ -33,7 +33,8 @@
     </section>
 
     <section id="app" class="hidden">
-      <div class="topline"><div><p class="eyebrow">DASHBOARD</p><h1>选择你的号码</h1></div><div class="purchase-mode card"><span>购买方式</span><strong>按次支付</strong><small>付款成功后自动取号</small></div></div>
+      <div class="topline"><div><p class="eyebrow">DASHBOARD</p><h1>选择你的号码</h1></div></div>
+      <div class="purchase-highlight"><div class="purchase-symbol">¥</div><div class="purchase-copy"><span>购买方式</span><strong>按次支付，无需预存余额</strong><small>付款成功后自动分配号码</small></div><div class="purchase-benefits"><b>微信 / 支付宝</b><b>自动取号</b><b>未接码持续换号</b></div></div>
       <div class="workspace">
         <section class="card picker"><div class="step"><i>01</i><div><label>国家 / 地区</label><select id="country"><option>正在载入...</option></select></div></div><div class="step"><i>02</i><div><label>服务</label><input id="search" placeholder="搜索 Telegram、Google..."><div id="service" class="service-list" role="listbox" aria-label="服务"></div></div></div><div class="payment-row"><label>支付方式<select id="payType"><option value="2">微信扫码</option><option value="3">微信 H5</option><option value="11">支付宝支付</option></select></label></div><div class="auto-replace">未收到验证码时，系统会自动更换号码并继续接收，直到成功获取验证码</div><div class="quote"><div><span>本单应付</span><strong id="price">请选择服务</strong><small id="stock"></small></div><button id="buy" class="primary" disabled>支付并取号</button></div></section>
         <section class="card orders"><div class="section-title"><div><p class="eyebrow">ACTIVATIONS</p><h2>我的订单</h2></div><button id="refresh" class="link">刷新</button></div><div id="orders"><div class="empty">还没有订单。选一个服务开始吧。</div></div></section>
