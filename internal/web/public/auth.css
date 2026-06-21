@@ -28,3 +28,9 @@
   background: #1677ff;
   font-size: 11px;
 }
+
+.verification-row { display: grid; grid-template-columns: 1fr 110px; gap: 8px; }
+.verification-row button { border: 1px solid #cddafe; border-radius: 10px; color: #2762ff; background: #edf3ff; font-weight: 700; cursor: pointer; }
+.verification-row button:disabled { opacity: .55; cursor: wait; }
+.turnstile-wrap { display: grid; gap: 5px; margin-top: 12px; min-height: 70px; }
+.turnstile-wrap small { color: var(--muted); font-size: 11px; }

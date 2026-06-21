@@ -19,6 +19,10 @@ func TestValidate(t *testing.T) {
 	if err := validEPay.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	validVerification := Config{HeroKey: "key", USDCNY: 7.2, Markup: 1, PayProvider: "sandbox", EmailVerificationRequired: true, SMTPHost: "smtp.example.com", SMTPPort: 587, SMTPFrom: "Cloud SMS <noreply@example.com>", TurnstileSiteKey: "site", TurnstileSecret: "secret"}
+	if err := validVerification.Validate(); err != nil {
+		t.Fatal(err)
+	}
 	tests := []Config{
 		{USDCNY: 7.2, Markup: 1, PayProvider: "sandbox"},
 		{HeroKey: "key", USDCNY: 0, Markup: 1, PayProvider: "sandbox"},
@@ -30,6 +34,8 @@ func TestValidate(t *testing.T) {
 		{HeroKey: "key", USDCNY: 7.2, Markup: 1, PayProvider: "epay", EPayPID: "1000", EPayKey: "secret", EPayURL: "http://50pay.example", BaseURL: "https://sms.example.com"},
 		{HeroKey: "key", SMSManToken: "smsman", SMSManURL: "http://api.sms-man.example/control", USDCNY: 7.2, Markup: 1, PayProvider: "sandbox"},
 		{SMSManToken: "smsman", SMSManURL: "https://api.sms-man.example/control", SMSManCNYRate: 0, USDCNY: 7.2, Markup: 1, PayProvider: "sandbox"},
+		{HeroKey: "key", USDCNY: 7.2, Markup: 1, PayProvider: "sandbox", EmailVerificationRequired: true},
+		{HeroKey: "key", USDCNY: 7.2, Markup: 1, PayProvider: "sandbox", EmailVerificationRequired: true, SMTPHost: "smtp.example.com", SMTPPort: 587, SMTPFrom: "noreply@example.com"},
 	}
 	for i, cfg := range tests {
 		if err := cfg.Validate(); err == nil {

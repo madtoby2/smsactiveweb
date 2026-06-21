@@ -14,6 +14,10 @@ type Config struct {
 	Port, BaseURL, HeroKey, HeroURL, HeroCurrency      string
 	SMSManToken, SMSManURL                             string
 	AdminEmail, AdminPassword                          string
+	SMTPHost, SMTPUser, SMTPPassword, SMTPFrom         string
+	TurnstileSiteKey, TurnstileSecret                  string
+	SMTPPort                                           int
+	EmailVerificationRequired                          bool
 	USDCNY, SMSManCNYRate, Markup                      float64
 	PayProvider, YSMAppID, YSMSecret, YSMURL           string
 	EPayPID, EPayKey, EPayURL                          string
@@ -23,6 +27,14 @@ type Config struct {
 }
 
 func (c Config) Validate() error {
+	if c.EmailVerificationRequired {
+		if c.SMTPHost == "" || c.SMTPPort <= 0 || c.SMTPFrom == "" {
+			return fmt.Errorf("SMTP_HOST, SMTP_PORT and SMTP_FROM are required when email verification is enabled")
+		}
+		if c.TurnstileSiteKey == "" || c.TurnstileSecret == "" {
+			return fmt.Errorf("TURNSTILE_SITE_KEY and TURNSTILE_SECRET are required when email verification is enabled")
+		}
+	}
 	if c.HeroKey == "" && c.SMSManToken == "" {
 		return fmt.Errorf("at least one SMS provider is required")
 	}
@@ -78,6 +90,8 @@ func Load() Config {
 		HeroKey: os.Getenv("HEROSMS_API_KEY"), HeroURL: env("HEROSMS_BASE_URL", "https://hero-sms.com/stubs/handler_api.php"), HeroCurrency: env("HEROSMS_CURRENCY", "840"),
 		SMSManToken: os.Getenv("SMSMAN_API_TOKEN"), SMSManURL: env("SMSMAN_BASE_URL", "https://api.sms-man.com/control"),
 		AdminEmail: strings.ToLower(strings.TrimSpace(env("ADMIN_EMAIL", "admin@local"))), AdminPassword: os.Getenv("ADMIN_PASSWORD"),
+		SMTPHost: os.Getenv("SMTP_HOST"), SMTPPort: envInt("SMTP_PORT", 587), SMTPUser: os.Getenv("SMTP_USER"), SMTPPassword: os.Getenv("SMTP_PASSWORD"), SMTPFrom: os.Getenv("SMTP_FROM"),
+		TurnstileSiteKey: os.Getenv("TURNSTILE_SITE_KEY"), TurnstileSecret: os.Getenv("TURNSTILE_SECRET"), EmailVerificationRequired: env("EMAIL_VERIFICATION_REQUIRED", "false") == "true",
 		USDCNY: envFloat("USD_CNY_RATE", 7.2), SMSManCNYRate: envFloat("SMSMAN_PRICE_CNY_RATE", 0.08), Markup: envFloat("PRICE_MARKUP_CNY", 1),
 		PayProvider: env("PAY_PROVIDER", "sandbox"), YSMAppID: os.Getenv("YSM_APP_ID"), YSMSecret: os.Getenv("YSM_SECRET"), YSMURL: env("YSM_BASE_URL", "https://www.yishoumi.cn"),
 		EPayPID: os.Getenv("EPAY_PID"), EPayKey: os.Getenv("EPAY_KEY"), EPayURL: env("EPAY_BASE_URL", "https://50pay.xiajuan88.com"),

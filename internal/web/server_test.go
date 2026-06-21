@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -16,6 +17,105 @@ import (
 	"sms-platform/internal/store"
 	"sms-platform/internal/yishoumi"
 )
+
+type verificationMailer struct {
+	to, code string
+	err      error
+}
+
+func (m *verificationMailer) SendVerification(_ context.Context, to, code string) error {
+	m.to, m.code = to, code
+	return m.err
+}
+
+type verificationTurnstile struct {
+	token, ip string
+	err       error
+}
+
+func TestRemoteIPOnlyTrustsForwardedHeaderFromLoopbackProxy(t *testing.T) {
+	proxied := httptest.NewRequest(http.MethodGet, "/", nil)
+	proxied.RemoteAddr = "127.0.0.1:1234"
+	proxied.Header.Set("X-Forwarded-For", "203.0.113.9, 127.0.0.1")
+	if got := remoteIP(proxied); got != "203.0.113.9" {
+		t.Fatalf("proxied IP=%q", got)
+	}
+	direct := httptest.NewRequest(http.MethodGet, "/", nil)
+	direct.RemoteAddr = "198.51.100.7:5678"
+	direct.Header.Set("X-Forwarded-For", "203.0.113.10")
+	if got := remoteIP(direct); got != "198.51.100.7" {
+		t.Fatalf("direct IP=%q", got)
+	}
+}
+
+func (v *verificationTurnstile) Verify(_ context.Context, token, ip string) error {
+	v.token, v.ip = token, ip
+	return v.err
+}
+
+func TestEmailVerifiedRegistrationFlow(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "verified-register.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := config.Config{BaseURL: "https://example.test", EmailVerificationRequired: true, TurnstileSiteKey: "site-key", TurnstileSecret: "secret"}
+	server := New(cfg, db)
+	mail := &verificationMailer{}
+	challenge := &verificationTurnstile{}
+	server.Mailer, server.Turnstile = mail, challenge
+	handler := server.Routes()
+
+	configRequest := httptest.NewRequest(http.MethodGet, "/api/auth/config", nil)
+	configResult := httptest.NewRecorder()
+	handler.ServeHTTP(configResult, configRequest)
+	if configResult.Code != http.StatusOK || !strings.Contains(configResult.Body.String(), `"emailVerificationRequired":true`) || !strings.Contains(configResult.Body.String(), "site-key") {
+		t.Fatalf("config=%s", configResult.Body.String())
+	}
+
+	send := httptest.NewRequest(http.MethodPost, "/api/auth/email-code", strings.NewReader(`{"email":"verified@example.com","turnstileToken":"challenge-token"}`))
+	send.Header.Set("content-type", "application/json")
+	send.RemoteAddr = "203.0.113.8:4321"
+	sendResult := httptest.NewRecorder()
+	handler.ServeHTTP(sendResult, send)
+	if sendResult.Code != http.StatusOK || mail.to != "verified@example.com" || len(mail.code) != 6 || challenge.token != "challenge-token" || challenge.ip != "203.0.113.8" {
+		t.Fatalf("send status=%d body=%s mail=%+v challenge=%+v", sendResult.Code, sendResult.Body.String(), mail, challenge)
+	}
+
+	repeat := httptest.NewRequest(http.MethodPost, "/api/auth/email-code", strings.NewReader(`{"email":"verified@example.com","turnstileToken":"challenge-token"}`))
+	repeat.Header.Set("content-type", "application/json")
+	repeat.RemoteAddr = "203.0.113.8:4321"
+	repeatResult := httptest.NewRecorder()
+	handler.ServeHTTP(repeatResult, repeat)
+	if repeatResult.Code != http.StatusTooManyRequests {
+		t.Fatalf("repeat status=%d body=%s", repeatResult.Code, repeatResult.Body.String())
+	}
+
+	wrong := httptest.NewRequest(http.MethodPost, "/api/auth/register", strings.NewReader(`{"Email":"verified@example.com","Password":"password123","Code":"000000"}`))
+	wrong.Header.Set("content-type", "application/json")
+	wrongResult := httptest.NewRecorder()
+	handler.ServeHTTP(wrongResult, wrong)
+	if wrongResult.Code != http.StatusBadRequest {
+		t.Fatalf("wrong code status=%d body=%s", wrongResult.Code, wrongResult.Body.String())
+	}
+
+	registerBody := fmt.Sprintf(`{"Email":"verified@example.com","Password":"password123","Code":"%s"}`, mail.code)
+	register := httptest.NewRequest(http.MethodPost, "/api/auth/register", strings.NewReader(registerBody))
+	register.Header.Set("content-type", "application/json")
+	registerResult := httptest.NewRecorder()
+	handler.ServeHTTP(registerResult, register)
+	if registerResult.Code != http.StatusCreated || len(registerResult.Result().Cookies()) != 1 {
+		t.Fatalf("register status=%d body=%s", registerResult.Code, registerResult.Body.String())
+	}
+
+	reuse := httptest.NewRequest(http.MethodPost, "/api/auth/register", strings.NewReader(registerBody))
+	reuse.Header.Set("content-type", "application/json")
+	reuseResult := httptest.NewRecorder()
+	handler.ServeHTTP(reuseResult, reuse)
+	if reuseResult.Code != http.StatusBadRequest {
+		t.Fatalf("reuse status=%d body=%s", reuseResult.Code, reuseResult.Body.String())
+	}
+}
 
 func TestAutoReplaceCancelsThenAcquiresWithoutChargingAgain(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "replace.db"))

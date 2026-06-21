@@ -185,7 +185,11 @@ CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,upd
 CREATE TABLE IF NOT EXISTS support_messages(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,sender TEXT NOT NULL CHECK(sender IN ('user','admin')),body TEXT NOT NULL,created_at TEXT NOT NULL,read_at TEXT,FOREIGN KEY(user_id) REFERENCES users(id));
 CREATE INDEX IF NOT EXISTS support_messages_user_id ON support_messages(user_id,id);
 CREATE TABLE IF NOT EXISTS announcements(id INTEGER PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY,action TEXT NOT NULL,target TEXT NOT NULL DEFAULT '',detail TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL);`); err != nil {
+CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY,action TEXT NOT NULL,target TEXT NOT NULL DEFAULT '',detail TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS email_verifications(email TEXT PRIMARY KEY,code_hash TEXT NOT NULL,expires_at TEXT NOT NULL,sent_at TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS email_verification_sends(id INTEGER PRIMARY KEY,email TEXT NOT NULL,ip TEXT NOT NULL,created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS email_verification_sends_email_time ON email_verification_sends(email,created_at);
+CREATE INDEX IF NOT EXISTS email_verification_sends_ip_time ON email_verification_sends(ip,created_at);`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -299,6 +303,98 @@ func (s *Store) Register(email, password string) (User, string, error) {
 	token, th := Token()
 	_, e = s.DB.Exec("INSERT INTO sessions VALUES(?,?,?)", th, id, time.Now().Add(sessionLifetime).UTC().Format(time.RFC3339))
 	return User{ID: id, Email: email}, token, e
+}
+
+func (s *Store) SaveEmailVerification(email, code, ip string) error {
+	now := time.Now().UTC()
+	nowText := now.Format(time.RFC3339)
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var exists int
+	if err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM users WHERE email=?)", email).Scan(&exists); err != nil {
+		return err
+	}
+	if exists == 1 {
+		return errors.New("邮箱已注册")
+	}
+	var lastSent string
+	_ = tx.QueryRow("SELECT COALESCE(MAX(created_at),'') FROM email_verification_sends WHERE email=?", email).Scan(&lastSent)
+	if lastSent != "" {
+		last, parseErr := time.Parse(time.RFC3339, lastSent)
+		if parseErr == nil && now.Sub(last) < time.Minute {
+			return errors.New("验证码发送过于频繁，请稍后再试")
+		}
+	}
+	var emailCount, ipCount int
+	if err = tx.QueryRow("SELECT COUNT(*) FROM email_verification_sends WHERE email=? AND created_at>=?", email, now.Add(-time.Hour).Format(time.RFC3339)).Scan(&emailCount); err != nil {
+		return err
+	}
+	if err = tx.QueryRow("SELECT COUNT(*) FROM email_verification_sends WHERE ip=? AND created_at>=?", ip, now.Add(-time.Hour).Format(time.RFC3339)).Scan(&ipCount); err != nil {
+		return err
+	}
+	if emailCount >= 5 || ipCount >= 20 {
+		return errors.New("验证码发送次数过多，请一小时后再试")
+	}
+	codeHash, err := Password("otp:" + code)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO email_verifications(email,code_hash,expires_at,sent_at,attempts) VALUES(?,?,?,?,0)
+		ON CONFLICT(email) DO UPDATE SET code_hash=excluded.code_hash,expires_at=excluded.expires_at,sent_at=excluded.sent_at,attempts=0`, email, codeHash, now.Add(10*time.Minute).Format(time.RFC3339), nowText); err != nil {
+		return err
+	}
+	if _, err = tx.Exec("INSERT INTO email_verification_sends(email,ip,created_at) VALUES(?,?,?)", email, ip, nowText); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) DeleteEmailVerification(email string) {
+	_, _ = s.DB.Exec("DELETE FROM email_verifications WHERE email=?", email)
+}
+
+func (s *Store) RegisterVerified(email, password, code string) (User, string, error) {
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return User{}, "", err
+	}
+	defer tx.Rollback()
+	var codeHash, expiresAt string
+	var attempts int
+	if err = tx.QueryRow("SELECT code_hash,expires_at,attempts FROM email_verifications WHERE email=?", email).Scan(&codeHash, &expiresAt, &attempts); err != nil {
+		return User{}, "", errors.New("请先获取邮箱验证码")
+	}
+	if attempts >= 5 || expiresAt <= time.Now().UTC().Format(time.RFC3339) {
+		return User{}, "", errors.New("验证码已过期，请重新获取")
+	}
+	if !VerifyPassword(codeHash, "otp:"+code) {
+		_, _ = tx.Exec("UPDATE email_verifications SET attempts=attempts+1 WHERE email=?", email)
+		_ = tx.Commit()
+		return User{}, "", errors.New("邮箱验证码错误")
+	}
+	passwordHash, err := Password(password)
+	if err != nil {
+		return User{}, "", err
+	}
+	result, err := tx.Exec("INSERT INTO users(email,password_hash,created_at)VALUES(?,?,?)", email, passwordHash, time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		return User{}, "", errors.New("邮箱已注册")
+	}
+	userID, _ := result.LastInsertId()
+	raw, tokenHash := Token()
+	if _, err = tx.Exec("INSERT INTO sessions VALUES(?,?,?)", tokenHash, userID, time.Now().Add(sessionLifetime).UTC().Format(time.RFC3339)); err != nil {
+		return User{}, "", err
+	}
+	if _, err = tx.Exec("DELETE FROM email_verifications WHERE email=?", email); err != nil {
+		return User{}, "", err
+	}
+	if err = tx.Commit(); err != nil {
+		return User{}, "", err
+	}
+	return User{ID: userID, Email: email}, raw, nil
 }
 func (s *Store) Login(email, password string) (User, string, error) {
 	var u User

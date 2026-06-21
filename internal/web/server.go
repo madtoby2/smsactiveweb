@@ -2,13 +2,17 @@ package web
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
 	"log"
+	"math/big"
+	"net"
 	"net/http"
+	netmail "net/mail"
 	"net/url"
 	"strconv"
 	"strings"
@@ -17,8 +21,10 @@ import (
 	"sms-platform/internal/config"
 	"sms-platform/internal/epay"
 	"sms-platform/internal/hero"
+	"sms-platform/internal/mailer"
 	"sms-platform/internal/smsman"
 	"sms-platform/internal/store"
+	"sms-platform/internal/turnstile"
 	"sms-platform/internal/yishoumi"
 )
 
@@ -26,13 +32,15 @@ import (
 var assets embed.FS
 
 type Server struct {
-	C        config.Config
-	Store    *store.Store
-	Hero     *hero.Client
-	SMSMan   *smsman.Client
-	SMSCache *smsmanCatalogCache
-	YSM      *yishoumi.Client
-	EPay     *epay.Client
+	C         config.Config
+	Store     *store.Store
+	Hero      *hero.Client
+	SMSMan    *smsman.Client
+	SMSCache  *smsmanCatalogCache
+	YSM       *yishoumi.Client
+	EPay      *epay.Client
+	Mailer    mailer.Sender
+	Turnstile turnstile.Verifier
 }
 type handler func(http.ResponseWriter, *http.Request, store.User)
 type adminHandler func(http.ResponseWriter, *http.Request)
@@ -53,7 +61,7 @@ func New(c config.Config, s *store.Store) *Server {
 	if c.PaymentOrderTTL < time.Minute {
 		c.PaymentOrderTTL = 20 * time.Minute
 	}
-	return &Server{C: c, Store: s, Hero: hero.New(c.HeroKey, c.HeroURL, c.HeroCurrency), SMSMan: smsman.New(c.SMSManToken, c.SMSManURL), SMSCache: newSMSManCatalogCache(), YSM: yishoumi.New(c.YSMAppID, c.YSMSecret, c.YSMURL), EPay: epay.New(c.EPayPID, c.EPayKey, c.EPayURL)}
+	return &Server{C: c, Store: s, Hero: hero.New(c.HeroKey, c.HeroURL, c.HeroCurrency), SMSMan: smsman.New(c.SMSManToken, c.SMSManURL), SMSCache: newSMSManCatalogCache(), YSM: yishoumi.New(c.YSMAppID, c.YSMSecret, c.YSMURL), EPay: epay.New(c.EPayPID, c.EPayKey, c.EPayURL), Mailer: &mailer.SMTP{Host: c.SMTPHost, Port: c.SMTPPort, User: c.SMTPUser, Password: c.SMTPPassword, From: c.SMTPFrom}, Turnstile: turnstile.New(c.TurnstileSecret)}
 }
 func (s *Server) Routes() http.Handler {
 	m := http.NewServeMux()
@@ -61,6 +69,8 @@ func (s *Server) Routes() http.Handler {
 	m.HandleFunc("GET /healthz", s.health)
 	m.Handle("/", http.FileServer(http.FS(sub)))
 	m.HandleFunc("POST /api/auth/register", s.register)
+	m.HandleFunc("GET /api/auth/config", s.authConfig)
+	m.HandleFunc("POST /api/auth/email-code", s.sendEmailCode)
 	m.HandleFunc("POST /api/auth/login", s.login)
 	m.HandleFunc("POST /api/auth/logout", s.logout)
 	m.HandleFunc("GET /api/me", s.auth(s.me))
@@ -109,7 +119,7 @@ func security(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "same-origin")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'self'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -147,18 +157,105 @@ func (s *Server) auth(next handler) http.HandlerFunc {
 func setSession(w http.ResponseWriter, token string, secure bool) {
 	http.SetCookie(w, &http.Cookie{Name: "session", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: secure, MaxAge: 30 * 86400})
 }
+func (s *Server) authConfig(w http.ResponseWriter, r *http.Request) {
+	jsonOut(w, 200, map[string]any{"emailVerificationRequired": s.C.EmailVerificationRequired, "turnstileSiteKey": s.C.TurnstileSiteKey})
+}
+
+func normalizedEmail(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	parsed, err := netmail.ParseAddress(value)
+	if err != nil || strings.ToLower(parsed.Address) != value || len(value) > 254 {
+		return "", fmt.Errorf("邮箱格式错误")
+	}
+	return value, nil
+}
+
+func remoteIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	parsed := net.ParseIP(host)
+	if parsed != nil && parsed.IsLoopback() {
+		forwarded := strings.TrimSpace(strings.SplitN(r.Header.Get("X-Forwarded-For"), ",", 2)[0])
+		if net.ParseIP(forwarded) != nil {
+			return forwarded
+		}
+	}
+	return host
+}
+
+func verificationCode() (string, error) {
+	value, err := rand.Int(rand.Reader, big.NewInt(1000000))
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%06d", value.Int64()), nil
+}
+
+func (s *Server) sendEmailCode(w http.ResponseWriter, r *http.Request) {
+	if !s.C.EmailVerificationRequired {
+		fail(w, http.StatusServiceUnavailable, "邮箱验证尚未启用")
+		return
+	}
+	var input struct {
+		Email          string `json:"email"`
+		TurnstileToken string `json:"turnstileToken"`
+	}
+	if decode(r, &input) != nil {
+		fail(w, 400, "请求格式错误")
+		return
+	}
+	email, err := normalizedEmail(input.Email)
+	if err != nil {
+		fail(w, 400, err)
+		return
+	}
+	if err = s.Turnstile.Verify(r.Context(), input.TurnstileToken, remoteIP(r)); err != nil {
+		fail(w, 403, "请完成人机验证")
+		return
+	}
+	code, err := verificationCode()
+	if err != nil {
+		fail(w, 500, "验证码生成失败")
+		return
+	}
+	if err = s.Store.SaveEmailVerification(email, code, remoteIP(r)); err != nil {
+		fail(w, 429, err)
+		return
+	}
+	if err = s.Mailer.SendVerification(r.Context(), email, code); err != nil {
+		s.Store.DeleteEmailVerification(email)
+		log.Printf("verification email delivery failed for %s: %v", email, err)
+		fail(w, 502, "验证码邮件发送失败，请稍后重试")
+		return
+	}
+	jsonOut(w, 200, map[string]any{"ok": true, "expiresIn": 600})
+}
+
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
-	var in struct{ Email, Password string }
+	var in struct{ Email, Password, Code string }
 	if decode(r, &in) != nil {
 		fail(w, 400, "请求格式错误")
 		return
 	}
-	in.Email = strings.ToLower(strings.TrimSpace(in.Email))
-	if !strings.Contains(in.Email, "@") {
-		fail(w, 400, "邮箱格式错误")
+	var e error
+	in.Email, e = normalizedEmail(in.Email)
+	if e != nil {
+		fail(w, 400, e)
 		return
 	}
-	u, t, e := s.Store.Register(in.Email, in.Password)
+	var u store.User
+	var t string
+	if s.C.EmailVerificationRequired {
+		if len(in.Code) != 6 {
+			fail(w, 400, "请输入 6 位邮箱验证码")
+			return
+		}
+		u, t, e = s.Store.RegisterVerified(in.Email, in.Password, in.Code)
+	} else {
+		u, t, e = s.Store.Register(in.Email, in.Password)
+	}
 	if e != nil {
 		fail(w, 400, e)
 		return

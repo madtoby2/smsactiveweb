@@ -1,5 +1,5 @@
 const $ = selector => document.querySelector(selector);
-const state = {register: false, offers: [], services: [], orders: [], selectedService: '', liveSmsPurchaseEnabled: false};
+const state = {register: false, offers: [], services: [], orders: [], selectedService: '', liveSmsPurchaseEnabled: false, authConfig: {emailVerificationRequired: false, turnstileSiteKey: ''}, turnstileWidget: null};
 
 async function api(path, options = {}) {
   const response = await fetch(path, {headers: {'content-type': 'application/json'}, ...options});
@@ -63,6 +63,7 @@ function generatedServiceIcon(code, name = '') {
 
 async function boot() {
   loadAnnouncements().catch(() => {});
+  await loadAuthConfig().catch(() => {});
   try {
     const me = await api('/api/me');
     showApp(me);
@@ -75,6 +76,29 @@ async function boot() {
   } catch {
     $('#auth').classList.remove('hidden');
   }
+}
+
+async function loadAuthConfig() {
+  state.authConfig = await api('/api/auth/config');
+}
+
+function loadTurnstile() {
+  if (!state.authConfig.emailVerificationRequired || !state.authConfig.turnstileSiteKey || state.turnstileWidget !== null) return;
+  const render = () => {
+    if (!globalThis.turnstile || state.turnstileWidget !== null) return;
+    state.turnstileWidget = globalThis.turnstile.render('#turnstileWidget', {sitekey: state.authConfig.turnstileSiteKey, theme: 'light'});
+  };
+  if (globalThis.turnstile) { render(); return; }
+  let script = document.querySelector('script[data-turnstile]');
+  if (!script) {
+    script = document.createElement('script');
+    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+    script.async = true;
+    script.defer = true;
+    script.dataset.turnstile = 'true';
+    document.head.appendChild(script);
+  }
+  script.addEventListener('load', render, {once: true});
 }
 
 async function loadAnnouncements() {
@@ -139,12 +163,40 @@ $('#toggleAuth').onclick = () => {
   $('#authTitle').textContent = state.register ? '创建账户' : '登录账户';
   $('#authSubmit').textContent = state.register ? '创建账户' : '登录';
   $('#toggleAuth').textContent = state.register ? '已有账户？返回登录' : '没有账户？立即注册';
+  const needsVerification = state.register && state.authConfig.emailVerificationRequired;
+  $('#verificationFields').classList.toggle('hidden', !needsVerification);
+  $('#emailCode').required = needsVerification;
+  if (needsVerification) loadTurnstile();
+};
+
+$('#sendEmailCode').onclick = async () => {
+  const button = $('#sendEmailCode');
+  $('#authError').textContent = '';
+  const token = state.turnstileWidget !== null && globalThis.turnstile ? globalThis.turnstile.getResponse(state.turnstileWidget) : '';
+  if (!token) { $('#authError').textContent = '请先完成人机验证'; return; }
+  button.disabled = true;
+  try {
+    await api('/api/auth/email-code', {method: 'POST', body: JSON.stringify({email: $('#email').value, turnstileToken: token})});
+    toast('验证码已发送，请检查邮箱');
+    if (globalThis.turnstile) globalThis.turnstile.reset(state.turnstileWidget);
+    let remaining = 60;
+    button.textContent = `${remaining} 秒后重发`;
+    const timer = setInterval(() => {
+      remaining--;
+      button.textContent = remaining > 0 ? `${remaining} 秒后重发` : '重新发送';
+      if (remaining <= 0) { clearInterval(timer); button.disabled = false; }
+    }, 1000);
+  } catch (error) {
+    $('#authError').textContent = error.message;
+    button.disabled = false;
+    if (globalThis.turnstile) globalThis.turnstile.reset(state.turnstileWidget);
+  }
 };
 $('#authForm').onsubmit = async event => {
   event.preventDefault();
   $('#authError').textContent = '';
   try {
-    await api(`/api/auth/${state.register ? 'register' : 'login'}`, {method: 'POST', body: JSON.stringify({Email: $('#email').value, Password: $('#password').value})});
+    await api(`/api/auth/${state.register ? 'register' : 'login'}`, {method: 'POST', body: JSON.stringify({Email: $('#email').value, Password: $('#password').value, ...(state.register && state.authConfig.emailVerificationRequired ? {Code: $('#emailCode').value} : {})})});
     showApp(await api('/api/me'));
     await Promise.all([loadCatalog(), loadOrders()]);
   } catch (error) {
