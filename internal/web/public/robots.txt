@@ -1,0 +1,10 @@
+User-agent: *
+Allow: /
+Disallow: /admin.html
+Disallow: /api/admin/
+Disallow: /api/auth/
+Disallow: /api/orders
+Disallow: /api/payments/
+Disallow: /sandbox/
+
+Sitemap: https://yunmatai.xyz/sitemap.xml

@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow,noarchive,nosnippet,noimageindex,max-snippet:0,max-image-preview:none">
+  <title>&#20113;&#30721;&#21488;&#31649;&#29702;&#20013;&#24515;</title>
+  <link rel="stylesheet" href="/admin.css?v=20260624g">
+</head>
+<body>
+  <section id="login" class="login-wrap">
+    <form id="loginForm" class="login-card" method="post" action="/api/admin/login" novalidate>
+      <div class="logo">Y</div>
+      <h1>&#31649;&#29702;&#20013;&#24515;</h1>
+      <p>&#20351;&#29992;&#31649;&#29702;&#21592;&#36134;&#25143;&#30331;&#24405;</p>
+      <label>&#31649;&#29702;&#21592;&#37038;&#31665;<input id="email" name="email" type="email" autocomplete="username" autocapitalize="none" spellcheck="false" required></label>
+      <label>&#23494;&#30721;<input id="password" name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">&#30331;&#24405;&#31649;&#29702;&#20013;&#24515;</button>
+      <div id="loginError" class="error"></div>
+    </form>
+  </section>
+
+  <div id="panel" class="panel hidden">
+    <aside>
+      <a class="admin-brand" href="/">
+        <span>Y</span>
+        <b>&#20113;&#30721;&#21488;</b>
+        <small>&#31649;&#29702;&#20013;&#24515;</small>
+      </a>
+      <nav>
+        <button data-view="dashboard" class="active">&#25968;&#25454;&#27010;&#35272;</button>
+        <button data-view="ordersView">&#35746;&#21333;&#31649;&#29702;</button>
+        <button data-view="payments">&#25903;&#20184;&#27969;&#27700;</button>
+        <button data-view="emailLogs">&#37038;&#20214;&#26085;&#24535;</button>
+        <button data-view="users">&#29992;&#25143;&#31649;&#29702;</button>
+        <button data-view="announcements">&#20844;&#21578;&#31649;&#29702;</button>
+        <button data-view="support">&#23458;&#26381;&#32842;&#22825; <i id="chatCount"></i></button>
+        <button data-view="audit">&#25805;&#20316;&#23457;&#35745;</button>
+        <button data-view="settings">&#31995;&#32479;&#35774;&#32622;</button>
+      </nav>
+      <button id="logout" class="logout">&#36864;&#20986;&#30331;&#24405;</button>
+    </aside>
+
+    <main>
+      <header>
+        <div>
+          <p>ADMIN CONSOLE</p>
+          <h1 id="viewTitle">&#25968;&#25454;&#27010;&#35272;</h1>
+        </div>
+        <button id="refresh" class="secondary">&#21047;&#26032;&#25968;&#25454;</button>
+      </header>
+
+      <section id="dashboard" class="view">
+        <div class="metrics">
+          <article><span>&#24635;&#19979;&#21333;&#25968;</span><strong id="ordersTotal">-</strong></article>
+          <article><span>&#20170;&#26085;&#19979;&#21333;</span><strong id="ordersToday">-</strong></article>
+          <article><span>&#25104;&#21151;&#25509;&#30721;</span><strong id="ordersSuccessful">-</strong></article>
+          <article><span>&#35746;&#21333;&#25910;&#20837;</span><strong id="revenue">-</strong></article>
+          <article><span>&#27880;&#20876;&#29992;&#25143;</span><strong id="usersTotal">-</strong></article>
+        </div>
+
+        <div class="balances">
+          <article>
+            <div class="provider hero">H</div>
+            <div>
+              <span>HeroSMS &#20313;&#39069;</span>
+              <strong id="heroBalance">&#35835;&#21462;&#20013;</strong>
+              <small id="heroError"></small>
+            </div>
+          </article>
+          <article>
+            <div class="provider smsman">S</div>
+            <div>
+              <span>SMS-Man &#20313;&#39069;</span>
+              <strong id="smsmanBalance">&#35835;&#21462;&#20013;</strong>
+              <small id="smsmanError"></small>
+            </div>
+          </article>
+        </div>
+
+        <article class="card">
+          <div class="card-title">
+            <h2>&#26368;&#36817;&#35746;&#21333;</h2>
+            <span>&#26368;&#22810;&#26174;&#31034; 50 &#26465;</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>&#35746;&#21333;</th>
+                  <th>&#29992;&#25143;</th>
+                  <th>&#26381;&#21153;</th>
+                  <th>&#28192;&#36947;</th>
+                  <th>&#37329;&#39069;</th>
+                  <th>&#29366;&#24577;</th>
+                  <th>&#26102;&#38388;</th>
+                </tr>
+              </thead>
+              <tbody id="recentOrders"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section id="ordersView" class="view hidden">
+        <article class="card">
+          <div class="card-title">
+            <h2>&#35746;&#21333;&#31649;&#29702;</h2>
+            <div class="filters">
+              <input id="orderQuery" placeholder="&#35746;&#21333;&#21495;&#12289;&#37038;&#31665;&#25110;&#25163;&#26426;&#21495;">
+              <select id="orderStatus">
+                <option value="">&#20840;&#37096;&#29366;&#24577;</option>
+                <option value="awaiting_payment">&#31561;&#24453;&#25903;&#20184;</option>
+                <option value="paid">&#24050;&#25903;&#20184;</option>
+                <option value="waiting">&#31561;&#24453;&#30701;&#20449;</option>
+                <option value="replacing">&#25442;&#21495;&#20013;</option>
+                <option value="code_received">&#24050;&#25509;&#30721;</option>
+                <option value="purchase_failed">&#21462;&#21495;&#22833;&#36133;</option>
+                <option value="admin_closed">&#31649;&#29702;&#21592;&#20851;&#38381;</option>
+              </select>
+              <button id="searchOrders">&#26597;&#35810;</button>
+            </div>
+          </div>
+          <div class="table-wrap orders-table-wrap">
+            <table class="orders-table">
+              <thead>
+                <tr>
+                  <th>&#35746;&#21333;</th>
+                  <th>&#29992;&#25143;</th>
+                  <th>&#22269;&#23478;/&#26381;&#21153;</th>
+                  <th>&#21495;&#30721;</th>
+                  <th>&#28192;&#36947;</th>
+                  <th>&#37329;&#39069;</th>
+                  <th>&#29366;&#24577;</th>
+                  <th>&#26102;&#38388;</th>
+                  <th>&#25805;&#20316;</th>
+                </tr>
+              </thead>
+              <tbody id="allOrders"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section id="payments" class="view hidden">
+        <article class="card">
+          <div class="card-title">
+            <h2>&#25903;&#20184;&#27969;&#27700;</h2>
+            <div class="filters">
+              <input id="paymentQuery" placeholder="&#25903;&#20184;&#21333;&#12289;&#35746;&#21333;&#25110;&#37038;&#31665;">
+              <select id="paymentStatus">
+                <option value="">&#20840;&#37096;&#29366;&#24577;</option>
+                <option value="pending">&#24453;&#25903;&#20184;</option>
+                <option value="paid">&#24050;&#25903;&#20184;</option>
+                <option value="failed">&#22833;&#36133;</option>
+                <option value="refunded">&#24050;&#36864;&#27454;</option>
+              </select>
+              <button id="searchPayments">&#26597;&#35810;</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>&#25903;&#20184;&#21333;</th>
+                  <th>&#29992;&#25143;</th>
+                  <th>&#35746;&#21333;</th>
+                  <th>&#28192;&#36947;/&#26041;&#24335;</th>
+                  <th>&#37329;&#39069;</th>
+                  <th>&#29366;&#24577;</th>
+                  <th>&#26102;&#38388;</th>
+                </tr>
+              </thead>
+              <tbody id="paymentRows"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section id="emailLogs" class="view hidden">
+        <article class="card">
+          <div class="card-title">
+            <h2>&#37038;&#20214;&#21457;&#36865;&#26085;&#24535;</h2>
+            <span>&#26368;&#36817; 200 &#26465;</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>&#25910;&#20214;&#37038;&#31665;</th>
+                  <th>&#36890;&#36947;</th>
+                  <th>&#21457;&#20214;&#20154;</th>
+                  <th>&#29366;&#24577;</th>
+                  <th>&#38169;&#35823;&#21407;&#22240;</th>
+                  <th>&#26102;&#38388;</th>
+                </tr>
+              </thead>
+              <tbody id="emailLogRows"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section id="users" class="view hidden">
+        <article class="card">
+          <div class="card-title">
+            <h2>&#29992;&#25143;&#31649;&#29702;</h2>
+            <div class="filters">
+              <input id="userQuery" placeholder="&#25628;&#32034;&#37038;&#31665;">
+              <button id="searchUsers">&#26597;&#35810;</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>&#37038;&#31665;</th>
+                  <th>&#35746;&#21333;&#25968;</th>
+                  <th>&#28040;&#36153;</th>
+                  <th>&#20313;&#39069;</th>
+                  <th>&#27880;&#20876;&#26102;&#38388;</th>
+                  <th>&#29366;&#24577;</th>
+                  <th>&#25805;&#20316;</th>
+                </tr>
+              </thead>
+              <tbody id="userRows"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section id="announcements" class="view hidden">
+        <div class="split-view">
+          <form id="announcementForm" class="card settings-card">
+            <div class="card-title"><h2 id="announcementFormTitle">&#21457;&#24067;&#20844;&#21578;</h2></div>
+            <input id="announcementID" type="hidden">
+            <label>&#26631;&#39064;<input id="announcementTitle" maxlength="100" required></label>
+            <label>&#20869;&#23481;<textarea id="announcementBody" maxlength="5000" required></textarea></label>
+            <label class="check"><input id="announcementActive" type="checkbox" checked>&#31435;&#21363;&#23637;&#31034;&#32473;&#29992;&#25143;</label>
+            <button type="submit">&#20445;&#23384;&#20844;&#21578;</button>
+            <button id="cancelAnnouncement" class="secondary" type="button">&#21462;&#28040;&#32534;&#36753;</button>
+          </form>
+
+          <article class="card">
+            <div class="card-title"><h2>&#20844;&#21578;&#21015;&#34920;</h2></div>
+            <div id="announcementList" class="announcement-list"></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="support" class="view hidden">
+        <div class="chat-layout card">
+          <div class="threads">
+            <div class="card-title"><h2>&#29992;&#25143;&#20250;&#35805;</h2></div>
+            <div id="threads"></div>
+          </div>
+          <div class="conversation">
+            <div id="chatHeader" class="chat-header">&#35831;&#36873;&#25321;&#19968;&#20301;&#29992;&#25143;</div>
+            <div id="messages" class="messages"></div>
+            <form id="replyForm" class="reply">
+              <textarea id="reply" maxlength="1000" placeholder="&#36755;&#20837;&#22238;&#22797;&#20869;&#23481;" disabled></textarea>
+              <button disabled>&#21457;&#36865;</button>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <section id="audit" class="view hidden">
+        <article class="card">
+          <div class="card-title">
+            <h2>&#21518;&#21488;&#25805;&#20316;&#23457;&#35745;</h2>
+            <span>&#26368;&#36817; 200 &#26465;</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>&#25805;&#20316;</th>
+                  <th>&#23545;&#35937;</th>
+                  <th>&#35814;&#24773;</th>
+                  <th>&#26102;&#38388;</th>
+                </tr>
+              </thead>
+              <tbody id="auditRows"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section id="settings" class="view hidden">
+        <form id="settingsForm" class="settings-card card">
+          <div class="card-title">
+            <div>
+              <h2>&#31995;&#32479;&#35774;&#32622;</h2>
+              <span>&#20445;&#23384;&#21518;&#31435;&#21051;&#29983;&#25928;</span>
+            </div>
+          </div>
+
+          <h3>&#38144;&#21806;&#23450;&#20215;</h3>
+          <div class="setting-grid">
+            <label>&#27599;&#21333;&#21152;&#20215;&#65288;&#20803;&#65289;<input id="markupCNY" type="number" min="0.01" max="1000" step="0.01"></label>
+            <label>&#32654;&#20803;&#20817;&#20154;&#27665;&#24065;<input id="usdCnyRate" type="number" min="0.01" max="1000" step="0.01"></label>
+            <label>SMS-Man &#21346;&#24067;&#20817;&#20154;&#27665;&#24065;<input id="smsmanCnyRate" type="number" min="0.001" max="1000" step="0.001"></label>
+          </div>
+
+          <h3>&#22269;&#23478;&#23553;&#31105;</h3>
+          <label>&#23553;&#31105;&#22269;&#23478; ID &#21015;&#34920;<input id="blockedCountries" maxlength="500" placeholder="&#20363;&#22914;&#65306;4,6,12"></label>
+          <p class="setting-note">&#22635;&#20889;&#22269;&#23478; ID&#65292;&#22810;&#20010;&#29992;&#33521;&#25991;&#36887;&#21495;&#20998;&#38548;&#12290;&#34987;&#23553;&#31105;&#22269;&#23478;&#19981;&#20250;&#20986;&#29616;&#22312;&#21069;&#21488;&#65292;&#20063;&#19981;&#33021;&#32487;&#32493;&#19979;&#21333;&#12290;</p>
+
+          <h3>&#21407;&#36335;&#36864;&#27454;&#39118;&#25511;</h3>
+          <div class="setting-grid">
+            <label>&#36864;&#27454;&#26102;&#38388;&#31383;&#21475;&#65288;&#20998;&#38047;&#65289;<input id="refundWindowMinutes" type="number" min="1" max="1440" step="1"></label>
+            <label>&#31383;&#21475;&#20869;&#26368;&#22810;&#36864;&#27454;&#27425;&#25968;<input id="refundMaxCount" type="number" min="0" max="100" step="1"></label>
+          </div>
+          <p class="setting-note">&#31649;&#29702;&#21592;&#20851;&#38381;&#35746;&#21333;&#26102;&#65292;&#36229;&#36807;&#38408;&#20540;&#23558;&#19981;&#20877;&#33258;&#21160;&#21407;&#36335;&#36864;&#27454;&#65292;&#20294;&#35746;&#21333;&#20173;&#20250;&#20851;&#38381;&#12290;</p>
+
+          <h3>&#27880;&#20876;&#37038;&#31665;&#39564;&#35777;</h3>
+          <div class="setting-grid">
+            <label>&#37038;&#20214;&#36890;&#36947;
+              <select id="mailProvider">
+                <option value="resend">Resend</option>
+                <option value="smtp">SMTP</option>
+              </select>
+            </label>
+          </div>
+
+          <div id="resendFields">
+            <p class="setting-note">&#25512;&#33616;&#20351;&#29992; Resend&#12290;API Key &#21482;&#21487;&#26356;&#26032;&#65292;&#19981;&#20250;&#22312;&#39029;&#38754;&#20013;&#22238;&#26174;&#12290;</p>
+            <div class="setting-grid">
+              <label>Resend API Key<input id="resendApiKey" type="password" maxlength="500" autocomplete="new-password" placeholder="&#30041;&#31354;&#21017;&#20445;&#25345;&#24403;&#21069; Key"></label>
+              <label>Resend &#21457;&#20214;&#20154;<input id="resendFrom" maxlength="320" placeholder="noreply@mail.yunmatai.xyz"></label>
+            </div>
+            <div class="smtp-status"><span id="resendApiKeyStatus">Resend Key &#29366;&#24577;&#35835;&#21462;&#20013;</span></div>
+          </div>
+
+          <div id="smtpFields">
+            <p class="setting-note">SMTP &#23494;&#30721;&#21482;&#21487;&#26356;&#26032;&#65292;&#19981;&#20250;&#22312;&#39029;&#38754;&#20013;&#22238;&#26174;&#12290;465 &#31471;&#21475;&#20351;&#29992;&#38544;&#24335; TLS&#65292;&#20854;&#23427;&#31471;&#21475;&#35201;&#27714; STARTTLS&#12290;</p>
+            <div class="setting-grid smtp-grid">
+              <label>SMTP &#20027;&#26426;<input id="smtpHost" maxlength="255" placeholder="smtp.example.com"></label>
+              <label>SMTP &#31471;&#21475;<input id="smtpPort" type="number" min="1" max="65535" placeholder="587"></label>
+              <label>SMTP &#29992;&#25143;&#21517;<input id="smtpUser" maxlength="255" autocomplete="off"></label>
+              <label>&#21457;&#20214;&#20154;<input id="smtpFrom" maxlength="320" placeholder="&#20113;&#30721;&#21488; &lt;no-reply@example.com&gt;"></label>
+              <label>SMTP &#23494;&#30721;<input id="smtpPassword" type="password" maxlength="500" autocomplete="new-password" placeholder="&#30041;&#31354;&#21017;&#20445;&#25345;&#24403;&#21069;&#23494;&#30721;"></label>
+            </div>
+            <div class="smtp-status"><span id="smtpPasswordStatus">SMTP &#23494;&#30721;&#29366;&#24577;&#35835;&#21462;&#20013;</span></div>
+          </div>
+
+          <div class="smtp-status"><span id="turnstileStatus">Turnstile &#29366;&#24577;&#35835;&#21462;&#20013;</span></div>
+          <label class="check"><input id="emailVerificationRequired" type="checkbox">&#27880;&#20876;&#26102;&#24517;&#39035;&#39564;&#35777;&#37038;&#31665;</label>
+
+          <h3>&#21069;&#21488;&#32852;&#31995;&#26041;&#24335;</h3>
+          <label>&#32852;&#31995;&#26041;&#24335;&#21517;&#31216;<input id="contactTitle" maxlength="100" placeholder="&#20363;&#22914;&#65306;Telegram &#23458;&#26381;"></label>
+          <label>&#32852;&#31995;&#26041;&#24335;&#20869;&#23481;<input id="contactValue" maxlength="300" placeholder="&#20363;&#22914;&#65306;@your_service"></label>
+          <label>&#36339;&#36716;&#38142;&#25509;<input id="contactURL" maxlength="500" type="url" placeholder="https://t.me/your_service"></label>
+          <label>&#23458;&#26381;&#26102;&#38388;<input id="supportHours" maxlength="100" placeholder="&#27599;&#26085; 09:00 - 23:00"></label>
+
+          <button type="submit">&#20445;&#23384;&#35774;&#32622;</button>
+          <span id="settingsResult"></span>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast"></div>
+  <script src="/admin.js?v=20260624g"></script>
+</body>
+</html>

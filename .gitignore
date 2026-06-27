@@ -1,0 +1,13 @@
+.env
+data/
+.gocache/
+.gocache_local/
+.gomodcache/
+.gomodcache_local/
+.tmpbuild/
+*.log
+app.exe
+*.exe~
+.test-*
+server.pid
+tmp-*.db
