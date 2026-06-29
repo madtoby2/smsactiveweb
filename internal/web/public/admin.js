@@ -350,7 +350,7 @@ function syncMailProviderUI() {
 
 $("#settingsForm").onsubmit = async event => {
   event.preventDefault();
-  const keys = ["markupCNY", "usdCnyRate", "smsmanCnyRate", "blockedCountries", "refundWindowMinutes", "refundMaxCount", "mailProvider", "smtpHost", "smtpPort", "smtpUser", "smtpFrom", "resendFrom", "contactTitle", "contactValue", "contactURL", "supportHours"];
+  const keys = ["markupCNY", "usdCnyRate", "smsmanCnyRate", "blockedCountries", "blockedServices", "refundWindowMinutes", "refundMaxCount", "mailProvider", "smtpHost", "smtpPort", "smtpUser", "smtpFrom", "resendFrom", "contactTitle", "contactValue", "contactURL", "supportHours"];
   const body = {};
   keys.forEach(key => body[key] = $(`#${key}`).value);
   body.emailVerificationRequired = String($("#emailVerificationRequired").checked);

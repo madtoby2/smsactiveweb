@@ -25,6 +25,7 @@ var settingKeys = map[string]bool{
 	"usdCnyRate":                true,
 	"smsmanCnyRate":             true,
 	"blockedCountries":          true,
+	"blockedServices":           true,
 	"refundWindowMinutes":       true,
 	"refundMaxCount":            true,
 	"mailProvider":              true,
@@ -305,6 +306,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	out["usdCnyRate"] = strconv.FormatFloat(pricing.USDCNY, 'f', -1, 64)
 	out["smsmanCnyRate"] = strconv.FormatFloat(pricing.SMSManCNY, 'f', -1, 64)
 	out["blockedCountries"] = values["blockedCountries"]
+	out["blockedServices"] = values["blockedServices"]
 	refund := s.effectiveRefundPolicy()
 	out["refundWindowMinutes"] = strconv.Itoa(refund.WindowMinutes)
 	out["refundMaxCount"] = strconv.Itoa(refund.MaxCount)
@@ -382,6 +384,19 @@ func (s *Server) updateAdminSettings(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
+		}
+		if key == "blockedServices" {
+			for _, item := range strings.Split(value, ",") {
+				item = strings.ToLower(strings.TrimSpace(item))
+				if item == "" {
+					continue
+				}
+				if len(item) > 32 || strings.ContainsAny(item, " \t\r\n/\\") {
+					fail(w, 400, "blockedServices must be a comma-separated list of service codes")
+					return
+				}
+			}
+			value = strings.ToLower(value)
 		}
 		if key == "smtpPort" {
 			port, err := strconv.Atoi(value)
@@ -473,6 +488,29 @@ func (s *Server) blockedCountries() map[string]bool {
 
 func (s *Server) countryBlocked(country string) bool {
 	return s.blockedCountries()[strings.TrimSpace(country)]
+}
+
+func parseBlockedServices(value string) map[string]bool {
+	blocked := map[string]bool{}
+	for _, item := range strings.Split(value, ",") {
+		item = strings.ToLower(strings.TrimSpace(item))
+		if item != "" {
+			blocked[item] = true
+		}
+	}
+	return blocked
+}
+
+func (s *Server) blockedServices() map[string]bool {
+	values, err := s.Store.Settings()
+	if err != nil {
+		return map[string]bool{}
+	}
+	return parseBlockedServices(values["blockedServices"])
+}
+
+func (s *Server) serviceBlocked(service string) bool {
+	return s.blockedServices()[strings.ToLower(strings.TrimSpace(service))]
 }
 
 func messageBody(r *http.Request) (string, error) {

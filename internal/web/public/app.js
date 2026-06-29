@@ -141,6 +141,10 @@ function canReplaceOrder(order) {
   return order?.Status === 'waiting';
 }
 
+function canCancelOrder(order) {
+  return order?.Status === 'waiting' && !order?.Code;
+}
+
 function canFinishOrder(order) {
   return order?.Status === 'waiting' || order?.Status === 'code_received';
 }
@@ -166,8 +170,10 @@ function saveNotifiedPhoneKeys(keys) {
 }
 async function copyText(text) {
   if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(String(text ?? ''));
-    return;
+    try {
+      await navigator.clipboard.writeText(String(text ?? ''));
+      return;
+    } catch {}
   }
   const input = document.createElement('textarea');
   input.value = text;
@@ -315,7 +321,7 @@ function applyCatalogData(data, preserveCountries = false) {
   const offers = data.offers || [];
   if (!preserveCountries || countries.length) {
     state.countries = countries;
-    $('#country').innerHTML = '<option value="">不限国家（自动最低价）</option>' + countries
+    $('#country').innerHTML = '<option value="">不限国家（自动推荐）</option>' + countries
       .filter(country => country.visible !== 0)
       .map(country => `<option value="${country.id}">${escapeHTML(country.chn || country.eng)} · ${escapeHTML(country.eng)}</option>`)
       .join('');
@@ -638,7 +644,7 @@ function renderServices() {
   const query = $('#search').value.toLowerCase();
   const available = new Map(state.offers.map(offer => [offer.service, offer]));
   const catalogServices = state.services.filter(service => available.has(service.code));
-  const services = (catalogServices.length ? catalogServices : servicePreviewCandidates(200).map(item => ({code: item.code, name: item.name})))
+  const services = catalogServices
     .filter(service => (`${service.name} ${service.code}`).toLowerCase().includes(query));
   $('#service').innerHTML = services.length ? services.map(service => `<button type="button" class="service-option${state.selectedService === service.code ? ' selected' : ''}" data-service="${escapeHTML(service.code)}" role="option" aria-selected="${state.selectedService === service.code}">${serviceIcon(service.code, service.name)}<span><b>${escapeHTML(service.name)}</b><small>${escapeHTML(service.code)}</small></span></button>`).join('') : '<div class="service-loading">没有可用服务</div>';
   document.querySelectorAll('.service-option').forEach(button => button.onclick = () => selectService(button.dataset.service));
@@ -653,7 +659,7 @@ function selectOffer() {
   $('#buy').disabled = !offer || !state.liveSmsPurchaseEnabled;
   $('#price').textContent = offer ? money(offer.priceFen) : '请选择服务';
   const cheapestCountry = offer ? Array.from($('#country').options).find(option => option.value === String(offer.country))?.textContent || offer.country : '';
-  const scope = offer && !$('#country').value ? ` · 全球最低价国家 ${cheapestCountry}` : '';
+  const scope = offer && !$('#country').value ? ` · 推荐国家 ${cheapestCountry}` : '';
   $('#stock').textContent = offer
     ? (state.liveSmsPurchaseEnabled
       ? `实时库存 ${offer.count} 个${scope}`
@@ -700,10 +706,17 @@ function renderOrders() {
         `)
       : '';
     const replaceButton = canReplaceOrder(order)
-      ? iconActionButton('replace-one', order.ID, '取消订单', `
+      ? iconActionButton('replace-one', order.ID, '更换号码', `
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M4 7h12a4 4 0 0 1 0 8H7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
             <path d="M7 11l-4 4 4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        `)
+      : '';
+    const cancelButton = canCancelOrder(order)
+      ? iconActionButton('cancel-one', order.ID, '取消购买', `
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 6l12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
           </svg>
         `)
       : '';
@@ -717,16 +730,20 @@ function renderOrders() {
     const refundTag = order.Refunded && ['admin_closed', 'cancelled'].includes(order.Status)
       ? '<small class="refund-tag">\u5df2\u9000\u6b3e</small>'
       : '';
-    return `<article class="order"><div class="order-service">${serviceIcon(order.Service, serviceName)}<span><span class="${order.Phone ? 'order-phone' : ''}">${phone}</span><small>${escapeHTML(orderCountryName(order))}${replaceText}</small></span></div><div><span class="badge">${status(order.Status)}</span>${refundTag}<small>${new Date(order.CreatedAt).toLocaleString()}</small></div><div>${order.Code ? `<code>${escapeHTML(order.Code)}</code>` : '<small>\u7b49\u5f85\u9a8c\u8bc1\u7801</small>'}<b>${money(order.PriceFen)}</b></div><div class="order-actions">${continueButton}${iconActionButton('refresh-one', order.ID, '刷新', `
+    const validityTag = ['waiting', 'replacing', 'code_received'].includes(order.Status)
+      ? '<small class="order-validity">20 分钟有效</small>'
+      : '';
+    return `<article class="order"><div class="order-service">${serviceIcon(order.Service, serviceName)}<span><span class="${order.Phone ? 'order-phone' : ''}">${phone}</span><small>${escapeHTML(orderCountryName(order))}${replaceText}</small></span></div><div><span class="badge">${status(order.Status)}</span>${refundTag}<small>${new Date(order.CreatedAt).toLocaleString()}</small>${validityTag}</div><div>${order.Code ? `<code>${escapeHTML(order.Code)}</code>` : '<small>\u7b49\u5f85\u9a8c\u8bc1\u7801</small>'}<b>${money(order.PriceFen)}</b></div><div class="order-actions">${continueButton}${iconActionButton('refresh-one', order.ID, '刷新', `
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="M20 11a8 8 0 1 0 2 5.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
         <path d="M20 4v7h-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-    `)}${replaceButton}${finishButton}</div></article>`;
+    `)}${replaceButton}${cancelButton}${finishButton}</div></article>`;
   }).join('');
   document.querySelectorAll('.continue-pay').forEach(button => button.onclick = () => continuePayment(button.dataset.id));
   document.querySelectorAll('.refresh-one').forEach(button => button.onclick = () => refreshOrder(button.dataset.id));
   document.querySelectorAll('.replace-one').forEach(button => button.onclick = () => manualReplace(button.dataset.id));
+  document.querySelectorAll('.cancel-one').forEach(button => button.onclick = () => cancelOrder(button.dataset.id));
   document.querySelectorAll('.finish-one').forEach(button => button.onclick = () => finishOrder(button.dataset.id));
   document.querySelectorAll('.show-phone').forEach(button => button.onclick = () => showPhoneModal(state.orders.find(order => String(order.ID) === button.dataset.id)));
   document.querySelectorAll('.copy-phone').forEach(button => button.onclick = async () => {
@@ -765,10 +782,23 @@ async function continuePayment(id) {
 }
 async function manualReplace(id) {
   try {
-    const confirmed = window.confirm('\u624b\u52a8\u6362\u53f7\u4f1a\u5148\u53d6\u6d88\u5f53\u524d\u53f7\u7801\uff0c\u518d\u5c1d\u8bd5\u83b7\u53d6\u4e00\u4e2a\u65b0\u53f7\u7801\u3002');
+    const confirmed = window.confirm('更换号码会先释放当前上游号码，再重新租赁一个新号码；这不是退款。确认更换吗？');
     if (!confirmed) return;
     await api(`/api/orders/${id}/replace`, {method: 'POST'});
     toast('\u5df2\u4e3a\u4f60\u66f4\u6362\u53f7\u7801');
+    await loadOrders();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+async function cancelOrder(id) {
+  try {
+    const confirmed = window.confirm('取消购买会先释放当前上游号码，再按退款规则尝试 50pay 原路退款。确认取消吗？');
+    if (!confirmed) return;
+    const result = await api(`/api/orders/${id}/cancel`, {method: 'POST'});
+    if (result.refunded) toast('订单已取消，已原路退款');
+    else if (result.reason === 'refund_threshold_reached') toast('订单已取消；短时间退款次数已达上限，未自动退款');
+    else toast('订单已取消');
     await loadOrders();
   } catch (error) {
     toast(error.message);

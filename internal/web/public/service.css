@@ -168,6 +168,21 @@
   color: #b6570c;
   border-color: #e3b27c;
 }
+.order-icon-btn.cancel-one {
+  color: #d43c3c;
+  border-color: #f0c4c4;
+  background: linear-gradient(135deg, #fff6f6, #ffffff);
+}
+.order-icon-btn.cancel-one:hover {
+  color: #b42323;
+  border-color: #e49191;
+}
+.order-validity {
+  display: block;
+  margin-top: 5px;
+  color: #7082a3;
+  font-size: 12px;
+}
 .phone-pill {
   max-width: 190px;
   padding: 7px 10px;
@@ -194,8 +209,8 @@
   color: #1f4fd6;
   font-size: 18px;
   font-weight: 800;
-  letter-spacing: .04em;
-  font-family: Inter, "Segoe UI", system-ui, sans-serif;
+  letter-spacing: 0;
+  font-family: "Segoe UI", Inter, system-ui, sans-serif;
   box-shadow: 0 8px 18px rgba(39, 98, 255, .08);
 }
 .copy-phone {

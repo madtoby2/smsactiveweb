@@ -380,19 +380,29 @@ func (s *Server) serveCatalog(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	blocked := s.blockedCountries()
-	if len(blocked) > 0 {
+	blockedCountries := s.blockedCountries()
+	blockedServices := s.blockedServices()
+	if len(blockedCountries) > 0 {
 		filteredCountries := make([]hero.Country, 0, len(snapshot.Countries))
 		for _, item := range snapshot.Countries {
-			if !blocked[strconv.Itoa(item.ID)] {
+			if !blockedCountries[strconv.Itoa(item.ID)] {
 				filteredCountries = append(filteredCountries, item)
 			}
 		}
 		snapshot.Countries = filteredCountries
-		for service, quote := range snapshot.Quotes {
-			if blocked[strings.TrimSpace(quote.Country)] {
-				delete(snapshot.Quotes, service)
+	}
+	if len(blockedServices) > 0 {
+		filteredServices := make([]hero.Service, 0, len(snapshot.Services))
+		for _, item := range snapshot.Services {
+			if !blockedServices[strings.ToLower(strings.TrimSpace(item.Code))] {
+				filteredServices = append(filteredServices, item)
 			}
+		}
+		snapshot.Services = filteredServices
+	}
+	for service, quote := range snapshot.Quotes {
+		if blockedCountries[strings.TrimSpace(quote.Country)] || blockedServices[strings.ToLower(strings.TrimSpace(service))] || blockedServices[strings.ToLower(strings.TrimSpace(quote.Service))] {
+			delete(snapshot.Quotes, service)
 		}
 	}
 	type priced struct {
@@ -436,16 +446,20 @@ func (s *Server) purchase(w http.ResponseWriter, r *http.Request, u store.User) 
 		fail(w, 403, "selected country is unavailable")
 		return
 	}
+	if s.serviceBlocked(in.Service) {
+		fail(w, 403, "该服务暂不可用")
+		return
+	}
 	snapshot, e := s.loadCatalog(r.Context(), in.Country)
 	if e != nil {
 		fail(w, 502, e)
 		return
 	}
-	if blocked := s.blockedCountries(); len(blocked) > 0 {
-		for service, quote := range snapshot.Quotes {
-			if blocked[strings.TrimSpace(quote.Country)] {
-				delete(snapshot.Quotes, service)
-			}
+	blockedCountries := s.blockedCountries()
+	blockedServices := s.blockedServices()
+	for service, quote := range snapshot.Quotes {
+		if blockedCountries[strings.TrimSpace(quote.Country)] || blockedServices[strings.ToLower(strings.TrimSpace(service))] || blockedServices[strings.ToLower(strings.TrimSpace(quote.Service))] {
+			delete(snapshot.Quotes, service)
 		}
 	}
 	quote, ok := snapshot.Quotes[in.Service]
@@ -519,7 +533,7 @@ func (s *Server) purchase(w http.ResponseWriter, r *http.Request, u store.User) 
 func (s *Server) orderStatus(w http.ResponseWriter, r *http.Request, u store.User) {
 	o, e := s.Store.GetSMS(r.PathValue("id"), u.ID)
 	if e != nil {
-		fail(w, 404, "?????")
+		fail(w, 404, "订单不存在")
 		return
 	}
 	o = s.syncOrderForUser(r.Context(), u.ID, o)
@@ -602,7 +616,7 @@ func parseHeroStatus(st string) (string, string) {
 func (s *Server) finishOrder(w http.ResponseWriter, r *http.Request, u store.User) {
 	o, e := s.Store.GetSMS(r.PathValue("id"), u.ID)
 	if e != nil {
-		fail(w, 404, "?????")
+		fail(w, 404, "订单不存在")
 		return
 	}
 	o = s.syncOrderForUser(r.Context(), u.ID, o)
@@ -651,15 +665,8 @@ func (s *Server) cancel(w http.ResponseWriter, r *http.Request, u store.User) {
 		fail(w, 409, "已收到验证码，不能取消")
 		return
 	}
-	if direct, err := s.Store.IsSMSPaymentOrder(o.ID); err != nil {
-		fail(w, 500, err)
-		return
-	} else if direct {
-		fail(w, 409, "按单支付订单将持续换号，暂不支持手动退款取消")
-		return
-	}
 	if o.Status != "waiting" {
-		fail(w, 409, "order is not cancellable in its current state")
+		fail(w, 409, "当前状态不能取消购买")
 		return
 	}
 	cancelled, e := s.cancelUpstream(r.Context(), o)

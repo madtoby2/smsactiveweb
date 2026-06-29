@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -156,13 +157,14 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 		return s.loadGlobalCatalog(ctx)
 	}
 	snapshot := catalogSnapshot{Quotes: map[string]providerQuote{}}
+	quoteCandidates := map[string][]providerQuote{}
 	livePricing := s.effectivePricing()
 	var heroErr error
 	if s.C.HeroKey != "" {
-		snapshot.Countries, heroErr = s.Hero.Countries(ctx)
-		if heroErr == nil {
-			snapshot.Services, heroErr = s.Hero.Services(ctx, country)
+		if countries, err := s.Hero.Countries(ctx); err == nil {
+			snapshot.Countries = countries
 		}
+		snapshot.Services, heroErr = s.Hero.Services(ctx, country)
 		if heroErr == nil {
 			var offers []hero.Offer
 			offers, heroErr = s.Hero.Offers(ctx, country)
@@ -174,10 +176,7 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 							candidateCountry = offer.Country
 						}
 						candidate := providerQuote{Service: offer.Service, Country: candidateCountry, Provider: "hero", ProviderCountry: candidateCountry, ProviderService: offer.Service, Cost: offer.Cost, Rate: livePricing.USDCNY, Count: offer.Count}
-						current, exists := snapshot.Quotes[offer.Service]
-						if !exists || candidate.priceFen(livePricing.Markup) < current.priceFen(livePricing.Markup) {
-							snapshot.Quotes[offer.Service] = candidate
-						}
+						quoteCandidates[offer.Service] = append(quoteCandidates[offer.Service], candidate)
 					}
 				}
 			}
@@ -187,6 +186,7 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 		if heroErr != nil {
 			return catalogSnapshot{}, heroErr
 		}
+		snapshot.Quotes = cheapestQuoteMap(quoteCandidates, livePricing)
 		return snapshot, nil
 	}
 
@@ -226,6 +226,7 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 		if heroErr != nil {
 			return catalogSnapshot{}, heroErr
 		}
+		snapshot.Quotes = cheapestQuoteMap(quoteCandidates, livePricing)
 		return snapshot, nil
 	}
 	smsQuotes, err := s.SMSCache.countryQuotes(ctx, s.SMSMan, smsCountryID)
@@ -247,11 +248,9 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 			continue
 		}
 		candidate := providerQuote{Service: service.Code, Country: country, Provider: "smsman", ProviderCountry: strconv.Itoa(smsCountryID), ProviderService: strconv.Itoa(applicationID), Cost: quote.Price, Rate: livePricing.SMSManCNY, Count: quote.Count}
-		current, exists := snapshot.Quotes[service.Code]
-		if !exists || candidate.priceFen(livePricing.Markup) < current.priceFen(livePricing.Markup) {
-			snapshot.Quotes[service.Code] = candidate
-		}
+		quoteCandidates[service.Code] = append(quoteCandidates[service.Code], candidate)
 	}
+	snapshot.Quotes = cheapestQuoteMap(quoteCandidates, livePricing)
 	if heroErr != nil && len(snapshot.Quotes) == 0 {
 		return catalogSnapshot{}, heroErr
 	}
@@ -278,11 +277,7 @@ func (s *Server) loadGlobalCatalog(ctx context.Context) (catalogSnapshot, error)
 			calls.Add(3)
 			go func() {
 				defer calls.Done()
-				var err error
-				heroCountries, err = s.Hero.Countries(ctx)
-				if err != nil {
-					errors <- err
-				}
+				heroCountries, _ = s.Hero.Countries(ctx)
 			}()
 			go func() {
 				defer calls.Done()
@@ -348,6 +343,7 @@ func (s *Server) loadGlobalCatalog(ctx context.Context) (catalogSnapshot, error)
 	providers.Wait()
 
 	snapshot := catalogSnapshot{Quotes: map[string]providerQuote{}}
+	quoteCandidates := map[string][]providerQuote{}
 	if heroErr == nil {
 		snapshot.Countries, snapshot.Services = heroCountries, heroServices
 		for _, offer := range heroOffers {
@@ -355,10 +351,7 @@ func (s *Server) loadGlobalCatalog(ctx context.Context) (catalogSnapshot, error)
 				continue
 			}
 			candidate := providerQuote{Service: offer.Service, Country: offer.Country, Provider: "hero", ProviderCountry: offer.Country, ProviderService: offer.Service, Cost: offer.Cost, Rate: pricing.USDCNY, Count: offer.Count}
-			current, exists := snapshot.Quotes[offer.Service]
-			if !exists || candidate.priceFen(pricing.Markup) < current.priceFen(pricing.Markup) {
-				snapshot.Quotes[offer.Service] = candidate
-			}
+			quoteCandidates[offer.Service] = append(quoteCandidates[offer.Service], candidate)
 		}
 	} else if smsErr == nil {
 		for _, item := range smsCountries {
@@ -395,17 +388,56 @@ func (s *Server) loadGlobalCatalog(ctx context.Context) (catalogSnapshot, error)
 					continue
 				}
 				candidate := providerQuote{Service: service.Code, Country: canonicalCountry, Provider: "smsman", ProviderCountry: strconv.Itoa(smsCountryID), ProviderService: strconv.Itoa(applicationID), Cost: quote.Price, Rate: pricing.SMSManCNY, Count: quote.Count}
-				current, exists := snapshot.Quotes[service.Code]
-				if !exists || candidate.priceFen(pricing.Markup) < current.priceFen(pricing.Markup) {
-					snapshot.Quotes[service.Code] = candidate
-				}
+				quoteCandidates[service.Code] = append(quoteCandidates[service.Code], candidate)
 			}
 		}
 	}
+	snapshot.Quotes = balancedQuoteMap(quoteCandidates, pricing)
 	if heroErr != nil && smsErr != nil {
 		return catalogSnapshot{}, fmt.Errorf("catalog providers unavailable: %v; %v", heroErr, smsErr)
 	}
 	return snapshot, nil
+}
+
+func balancedQuoteMap(candidates map[string][]providerQuote, pricing livePricing) map[string]providerQuote {
+	out := map[string]providerQuote{}
+	for service, items := range candidates {
+		available := make([]providerQuote, 0, len(items))
+		for _, item := range items {
+			if item.Count > 0 {
+				available = append(available, item)
+			}
+		}
+		if len(available) == 0 {
+			continue
+		}
+		sort.SliceStable(available, func(i, j int) bool {
+			left := available[i].priceFen(pricing.Markup)
+			right := available[j].priceFen(pricing.Markup)
+			if left == right {
+				return available[i].Count > available[j].Count
+			}
+			return left < right
+		})
+		out[service] = available[len(available)/2]
+	}
+	return out
+}
+
+func cheapestQuoteMap(candidates map[string][]providerQuote, pricing livePricing) map[string]providerQuote {
+	out := map[string]providerQuote{}
+	for service, items := range candidates {
+		for _, item := range items {
+			if item.Count <= 0 {
+				continue
+			}
+			current, exists := out[service]
+			if !exists || item.priceFen(pricing.Markup) < current.priceFen(pricing.Markup) {
+				out[service] = item
+			}
+		}
+	}
+	return out
 }
 
 func matchingHeroCountryID(items []hero.Country, name string) int {

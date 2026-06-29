@@ -1,4 +1,4 @@
-﻿package web
+package web
 
 import (
 	"context"
@@ -661,7 +661,7 @@ func TestPayForSMSOrderThenAcquireEndToEnd(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Query().Get("action") {
 		case "getCountries":
-			_, _ = w.Write([]byte(`{"6":{"id":6,"eng":"Indonesia","chn":"鍗板害灏艰タ浜?}}`))
+			_, _ = w.Write([]byte(`{"6":{"id":6,"eng":"Indonesia","chn":"印度尼西亚"}}`))
 		case "getServicesList":
 			_, _ = w.Write([]byte(`{"services":[{"code":"tg","name":"Telegram"}]}`))
 		case "getPrices":
@@ -745,7 +745,7 @@ func TestAggregatedQuoteSelectsSMSManAndRoutesPaidOrder(t *testing.T) {
 	heroUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Query().Get("action") {
 		case "getCountries":
-			_, _ = w.Write([]byte(`{"2":{"id":2,"eng":"Kazakhstan","chn":"鍝堣惃鍏嬫柉鍧?}}`))
+			_, _ = w.Write([]byte(`{"2":{"id":2,"eng":"Kazakhstan","chn":"哈萨克斯坦"}}`))
 		case "getServicesList":
 			_, _ = w.Write([]byte(`{"services":[{"code":"tg","name":"Telegram"}]}`))
 		case "getPrices":
@@ -841,7 +841,7 @@ func TestAggregatedQuoteSelectsSMSManAndRoutesPaidOrder(t *testing.T) {
 	}
 }
 
-func TestGlobalCheapestQuotePurchasesItsCountryWithoutCountrySelection(t *testing.T) {
+func TestGlobalRecommendedQuotePurchasesItsCountryWithoutCountrySelection(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "global-cheapest.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -850,7 +850,7 @@ func TestGlobalCheapestQuotePurchasesItsCountryWithoutCountrySelection(t *testin
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Query().Get("action") {
 		case "getCountries":
-			_, _ = w.Write([]byte(`{"6":{"id":6,"eng":"Indonesia","chn":"鍗板害灏艰タ浜?},"7":{"id":7,"eng":"Malaysia","chn":"椹潵瑗夸簹"}}`))
+			_, _ = w.Write([]byte(`{"6":{"id":6,"eng":"Indonesia","chn":"印度尼西亚"},"7":{"id":7,"eng":"Malaysia","chn":"马来西亚"}}`))
 		case "getServicesList":
 			_, _ = w.Write([]byte(`{"services":[{"code":"tg","name":"Telegram"}]}`))
 		case "getPrices":
@@ -885,7 +885,7 @@ func TestGlobalCheapestQuotePurchasesItsCountryWithoutCountrySelection(t *testin
 		t.Fatal(err)
 	}
 	order, err := db.GetSMSByID(checkout.ID)
-	if err != nil || order.Country != "7" || order.UpstreamCountry != "7" || checkout.PriceFen != 245 {
+	if err != nil || order.Country != "6" || order.UpstreamCountry != "6" || checkout.PriceFen != 460 {
 		t.Fatalf("order=%+v price=%d err=%v", order, checkout.PriceFen, err)
 	}
 }
@@ -1364,4 +1364,3 @@ func TestYishoumiNotifyRejectsWrongAmount(t *testing.T) {
 		t.Fatalf("status=%d, want 400", w.Code)
 	}
 }
-
