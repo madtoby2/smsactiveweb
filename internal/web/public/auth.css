@@ -105,24 +105,26 @@
   font-size: 11px;
 }
 .auth-preview-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(38px, 1fr));
+  gap: 10px;
 }
 .auth-preview-flag {
-  width: 40px;
+  width: 100%;
+  max-width: 48px;
   height: 40px;
   display: inline-grid;
   place-items: center;
-  border: 1px solid #e0e9f8;
-  border-radius: 999px;
+  justify-self: center;
+  border: 1px solid #d9e5ff;
+  border-radius: 12px;
   background: #fbfcff;
   color: #10223d;
   font-size: 12px;
   font-weight: 800;
   line-height: 1;
   overflow: hidden;
-  box-shadow: 0 10px 22px rgba(39, 67, 124, 0.06);
+  box-shadow: 0 10px 22px rgba(39, 67, 124, 0.08);
 }
 .auth-preview-flag img {
   width: 100%;

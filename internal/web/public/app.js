@@ -372,11 +372,23 @@ function renderAuthPreview() {
     {id: '11', chn: '日本', eng: 'Japan'},
     {id: '4', chn: '菲律宾', eng: 'Philippines'},
     {id: '7', chn: '马来西亚', eng: 'Malaysia'},
+    {id: 'id', chn: '印度尼西亚', eng: 'Indonesia'},
+    {id: 'in', chn: '印度', eng: 'India'},
+    {id: 'th', chn: '泰国', eng: 'Thailand'},
+    {id: 'vn', chn: '越南', eng: 'Vietnam'},
+    {id: 'kr', chn: '韩国', eng: 'South Korea'},
     {id: 'au', chn: '澳大利亚', eng: 'Australia'},
     {id: 'gb', chn: '英国', eng: 'United Kingdom'},
     {id: 'sg', chn: '新加坡', eng: 'Singapore'},
+    {id: 'ca', chn: '加拿大', eng: 'Canada'},
+    {id: 'de', chn: '德国', eng: 'Germany'},
+    {id: 'fr', chn: '法国', eng: 'France'},
+    {id: 'br', chn: '巴西', eng: 'Brazil'},
+    {id: 'mx', chn: '墨西哥', eng: 'Mexico'},
+    {id: 'tr', chn: '土耳其', eng: 'Turkey'},
+    {id: 'za', chn: '南非', eng: 'South Africa'},
   ];
-  const previewCountries = preferredCountries.slice(0, 8);
+  const previewCountries = preferredCountries;
   if (previewCountries.length) {
     countryBox.innerHTML = previewCountries.map(countryFlagMarkup).join('');
   }
