@@ -566,7 +566,7 @@ func (s *Server) syncOrderForUser(ctx context.Context, userID int64, order store
 			order = refreshed
 		}
 	}
-	if order.UpstreamID != "" && (order.Status == "waiting" || order.Status == "replacing") {
+	if order.UpstreamID != "" && order.Status == "waiting" {
 		status, code, err := s.providerStatus(ctx, order)
 		if err == nil && status != "" && (status != order.Status || (code != "" && code != order.Code)) {
 			_ = s.Store.UpdateSMS(order.ID, status, code)
@@ -740,6 +740,10 @@ func (s *Server) cancel(w http.ResponseWriter, r *http.Request, u store.User) {
 		fail(w, 409, "当前状态不能取消购买")
 		return
 	}
+	if wait := heroActionCooldownRemaining(o); wait > 0 {
+		fail(w, 409, fmt.Sprintf("HeroSMS 闇€瑕佺瓑寰? %d 绉掑悗鎵嶈兘鍏抽棴璁㈠崟", wait))
+		return
+	}
 	cancelled, e := s.cancelUpstream(r.Context(), o)
 	if e != nil {
 		fail(w, 409, e)
@@ -801,6 +805,10 @@ func (s *Server) manualReplace(w http.ResponseWriter, r *http.Request, u store.U
 		fail(w, 409, "当前状态不支持手动换号")
 		return
 	}
+	if wait := heroActionCooldownRemaining(o); wait > 0 {
+		fail(w, 409, fmt.Sprintf("HeroSMS 闇€瑕佺瓑寰? %d 绉掑悗鎵嶈兘鍐嶆鎹㈠彿", wait))
+		return
+	}
 	if claimed, err := s.Store.ClaimAutoReplace(o.ID, o.UpstreamID); err != nil || !claimed {
 		if err != nil {
 			fail(w, 500, err)
@@ -844,6 +852,8 @@ func (s *Server) RunAutoReplace(ctx context.Context) {
 	defer ticker.Stop()
 	s.runExpiredPaymentCleanup()
 	s.runPaidOrderBatch(ctx)
+	s.runReplacingBatch(ctx)
+	s.runAutoReplaceBatch(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -851,8 +861,32 @@ func (s *Server) RunAutoReplace(ctx context.Context) {
 		case <-ticker.C:
 			s.runExpiredPaymentCleanup()
 			s.runPaidOrderBatch(ctx)
+			s.runReplacingBatch(ctx)
+			s.runAutoReplaceBatch(ctx)
 		}
 	}
+}
+
+func heroActionCooldownRemaining(o store.SMSOrder) int {
+	if o.UpstreamProvider != "" && o.UpstreamProvider != "hero" {
+		return 0
+	}
+	if strings.TrimSpace(o.LastNumberAt) == "" {
+		return 0
+	}
+	last, err := time.Parse(time.RFC3339, o.LastNumberAt)
+	if err != nil {
+		return 0
+	}
+	remaining := time.Until(last.Add(2 * time.Minute))
+	if remaining <= 0 {
+		return 0
+	}
+	seconds := int(remaining.Round(time.Second) / time.Second)
+	if seconds < 1 {
+		return 1
+	}
+	return seconds
 }
 
 func (s *Server) runExpiredPaymentCleanup() {

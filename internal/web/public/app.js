@@ -164,11 +164,11 @@ function countryFlagMarkup(country) {
   return `<span class="auth-preview-flag" title="${escapeHTML(title)}" aria-label="${escapeHTML(title)}"><img src="/flags/${code}.svg" alt=""></span>`;
 }
 function canReplaceOrder(order) {
-  return order?.Status === 'waiting';
+  return order?.Status === 'waiting' && heroCooldownRemaining(order) === 0;
 }
 
 function canCancelOrder(order) {
-  return order?.Status === 'waiting' && !order?.Code;
+  return order?.Status === 'waiting' && !order?.Code && heroCooldownRemaining(order) === 0;
 }
 
 function canFinishOrder(order) {
@@ -184,6 +184,14 @@ function canContinuePayment(order) {
 }
 function canRefreshOrder(order) {
   return ['paid', 'purchasing', 'waiting', 'replacing', 'code_received'].includes(order?.Status);
+}
+
+function heroCooldownRemaining(order) {
+  if ((order?.UpstreamProvider || 'hero') !== 'hero') return 0;
+  if (!order?.LastNumberAt) return 0;
+  const last = Date.parse(order.LastNumberAt);
+  if (!Number.isFinite(last)) return 0;
+  return Math.max(0, Math.ceil((last + 120000 - Date.now()) / 1000));
 }
 function shouldRevealOrderPhone(order) {
   return ['waiting', 'replacing', 'code_received', 'finished'].includes(order?.Status);
@@ -810,6 +818,7 @@ function renderOrders() {
   box.innerHTML = recentOrders.map(order => {
     const serviceName = serviceDisplayName(order.Service);
     const replaceText = ['waiting', 'replacing', 'code_received'].includes(order.Status) ? replaceAttemptsText(order.ReplaceAttempts) : '';
+    const cooldownRemaining = heroCooldownRemaining(order);
     const phoneParts = order.Phone ? splitPhoneNumber(order.Phone, order.Country) : null;
     const phone = order.Phone && shouldRevealOrderPhone(order)
       ? `<button class="phone-pill show-phone" type="button" data-id="${escapeHTML(orderId(order))}" title="\u67e5\u770b\u53f7\u7801">${phoneParts?.prefix ? `<span class="phone-prefix">${escapeHTML(phoneParts.prefix)}</span>` : ''}<span class="phone-main">${escapeHTML(phoneParts?.number || '')}</span></button><button class="copy-phone" type="button" data-phone="${escapeHTML(formatPhoneNumber(order.Phone, order.Country))}">\u590d\u5236</button>`
@@ -858,6 +867,9 @@ function renderOrders() {
     const validityTag = ['waiting', 'replacing', 'code_received'].includes(order.Status)
       ? '<small class="order-validity">20 分钟有效</small>'
       : '';
+    const cooldownTag = cooldownRemaining > 0
+      ? `<small class="order-validity">HeroSMS ${cooldownRemaining} 秒后可换号/关闭</small>`
+      : '';
     const refreshButton = canRefreshOrder(order)
       ? iconActionButton('refresh-one', orderId(order), '刷新', `
       <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -866,7 +878,7 @@ function renderOrders() {
       </svg>
     `)
       : '';
-    return `<article class="order"><div class="order-service">${serviceIcon(order.Service, serviceName)}<span><span class="${order.Phone ? 'order-phone' : ''}">${phone}</span><small>${escapeHTML(orderCountryName(order))}${replaceText}</small></span></div><div><span class="badge">${status(order.Status)}</span>${refundTag}<small>${new Date(order.CreatedAt).toLocaleString()}</small>${validityTag}</div><div>${order.Code ? `<code>${escapeHTML(order.Code)}</code>` : '<small>\u7b49\u5f85\u9a8c\u8bc1\u7801</small>'}<b>${money(order.PriceFen)}</b></div><div class="order-actions">${continueButton}${refreshButton}${replaceButton}${cancelButton}${resendButton}${finishButton}</div></article>`;
+    return `<article class="order"><div class="order-service">${serviceIcon(order.Service, serviceName)}<span><span class="${order.Phone ? 'order-phone' : ''}">${phone}</span><small>${escapeHTML(orderCountryName(order))}${replaceText}</small></span></div><div><span class="badge">${status(order.Status)}</span>${refundTag}<small>${new Date(order.CreatedAt).toLocaleString()}</small>${validityTag}${cooldownTag}</div><div>${order.Code ? `<code>${escapeHTML(order.Code)}</code>` : '<small>\u7b49\u5f85\u9a8c\u8bc1\u7801</small>'}<b>${money(order.PriceFen)}</b></div><div class="order-actions">${continueButton}${refreshButton}${replaceButton}${cancelButton}${resendButton}${finishButton}</div></article>`;
   }).join('');
   document.querySelectorAll('.continue-pay').forEach(button => button.onclick = () => continuePayment(button.dataset.id));
   document.querySelectorAll('.refresh-one').forEach(button => button.onclick = () => refreshOrder(button.dataset.id));

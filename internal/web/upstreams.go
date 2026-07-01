@@ -417,7 +417,7 @@ func countryServiceQuoteList(candidates map[string][]providerQuote, pricing live
 			}
 			composite := key{service: service, country: item.Country}
 			current, exists := best[composite]
-			if !exists || item.priceFen(pricing.Markup) < current.priceFen(pricing.Markup) || (item.priceFen(pricing.Markup) == current.priceFen(pricing.Markup) && item.Count > current.Count) {
+			if !exists || preferQuote(item, current, pricing) {
 				best[composite] = item
 			}
 		}
@@ -428,10 +428,10 @@ func countryServiceQuoteList(candidates map[string][]providerQuote, pricing live
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Service == out[j].Service {
-			if out[i].priceFen(pricing.Markup) == out[j].priceFen(pricing.Markup) {
-				return out[i].Count > out[j].Count
+			if out[i].Count == out[j].Count {
+				return out[i].priceFen(pricing.Markup) < out[j].priceFen(pricing.Markup)
 			}
-			return out[i].priceFen(pricing.Markup) < out[j].priceFen(pricing.Markup)
+			return out[i].Count > out[j].Count
 		}
 		return out[i].Service < out[j].Service
 	})
@@ -442,7 +442,7 @@ func recommendedQuoteMap(offers []providerQuote, pricing livePricing) map[string
 	out := map[string]providerQuote{}
 	for _, item := range offers {
 		current, exists := out[item.Service]
-		if !exists || item.priceFen(pricing.Markup) < current.priceFen(pricing.Markup) || (item.priceFen(pricing.Markup) == current.priceFen(pricing.Markup) && item.Count > current.Count) {
+		if !exists || preferQuote(item, current, pricing) {
 			out[item.Service] = item
 		}
 	}
@@ -482,12 +482,30 @@ func cheapestQuoteMap(candidates map[string][]providerQuote, pricing livePricing
 				continue
 			}
 			current, exists := out[service]
-			if !exists || item.priceFen(pricing.Markup) < current.priceFen(pricing.Markup) {
+			if !exists || preferQuote(item, current, pricing) {
 				out[service] = item
 			}
 		}
 	}
 	return out
+}
+
+func preferQuote(candidate, current providerQuote, pricing livePricing) bool {
+	if candidate.Count != current.Count {
+		return candidate.Count > current.Count
+	}
+	candidatePrice := candidate.priceFen(pricing.Markup)
+	currentPrice := current.priceFen(pricing.Markup)
+	if candidatePrice != currentPrice {
+		return candidatePrice < currentPrice
+	}
+	if candidate.Provider != current.Provider {
+		return candidate.Provider < current.Provider
+	}
+	if candidate.Country != current.Country {
+		return candidate.Country < current.Country
+	}
+	return candidate.Service < current.Service
 }
 
 func quoteListFromMap(quotes map[string]providerQuote) []providerQuote {

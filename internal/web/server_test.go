@@ -323,6 +323,9 @@ func TestManualReplaceCancelsThenAcquiresNewNumber(t *testing.T) {
 	if err = db.ActivateSMS(o.ID, "old-id", "10001", .5); err != nil {
 		t.Fatal(err)
 	}
+	if _, err = db.DB.Exec("UPDATE sms_orders SET last_number_at=? WHERE id=?", time.Now().UTC().Add(-3*time.Minute).Format(time.RFC3339), o.ID); err != nil {
+		t.Fatal(err)
+	}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Query().Get("action") {
 		case "setStatus":
@@ -881,8 +884,15 @@ func TestAggregatedQuoteSelectsSMSManAndRoutesPaidOrder(t *testing.T) {
 			_, _ = w.Write([]byte(`{"services":[{"code":"tg","name":"Telegram"}]}`))
 		case "getPrices":
 			_, _ = w.Write([]byte(`{"2":{"tg":{"cost":1,"count":5}}}`))
+		case "getNumberV2":
+			if r.URL.Query().Get("country") != "2" || r.URL.Query().Get("service") != "tg" {
+				t.Fatalf("wrong Hero route country=%q service=%q", r.URL.Query().Get("country"), r.URL.Query().Get("service"))
+			}
+			_, _ = w.Write([]byte(`{"activationId":"hero-agg-id","phoneNumber":"77000000001","activationCost":1}`))
+		case "getStatus":
+			_, _ = w.Write([]byte("STATUS_OK:246810"))
 		default:
-			http.Error(w, "HeroSMS should not acquire the more expensive number", http.StatusBadRequest)
+			http.NotFound(w, r)
 		}
 	}))
 	defer heroUpstream.Close()
@@ -933,11 +943,11 @@ func TestAggregatedQuoteSelectsSMSManAndRoutesPaidOrder(t *testing.T) {
 	if err = json.NewDecoder(purchaseResult.Body).Decode(&checkout); err != nil {
 		t.Fatal(err)
 	}
-	if checkout.PriceFen != 500 {
-		t.Fatalf("aggregated price=%d, want 500", checkout.PriceFen)
+	if checkout.PriceFen != 820 {
+		t.Fatalf("aggregated price=%d, want 820", checkout.PriceFen)
 	}
 	pending, err := db.GetSMSByID(checkout.ID)
-	if err != nil || pending.UpstreamProvider != "smsman" || pending.UpstreamCountry != "99" || pending.UpstreamService != "88" {
+	if err != nil || pending.UpstreamProvider != "hero" || pending.UpstreamCountry != "2" || pending.UpstreamService != "tg" {
 		t.Fatalf("pending=%+v err=%v", pending, err)
 	}
 	checkoutURL, _ := url.Parse(checkout.URL)
@@ -1446,6 +1456,9 @@ func TestCancelOrderRefundsPaidWaitingOrder(t *testing.T) {
 		EPayPlatformPublicKey:  platformPublic,
 		EPayMerchantPrivateKey: merchantPrivate,
 	}, db).Routes()
+	if _, err = db.DB.Exec("UPDATE sms_orders SET last_number_at=? WHERE id=?", time.Now().UTC().Add(-3*time.Minute).Format(time.RFC3339), o.ID); err != nil {
+		t.Fatal(err)
+	}
 	req := httptest.NewRequest(http.MethodPost, "/api/orders/SCANCELREFUND/cancel", nil)
 	req.AddCookie(&http.Cookie{Name: "session", Value: token})
 	w := httptest.NewRecorder()
@@ -1813,6 +1826,178 @@ func TestYishoumiNotifyRejectsWrongAmount(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d, want 400", w.Code)
+	}
+}
+
+func TestSyncOrderDoesNotDowngradeReplacingOrderFromStaleUpstreamStatus(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "sync-replacing.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	u, _, err := db.Register("sync-replacing@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.DB.Exec("UPDATE users SET balance_fen=1000 WHERE id=?", u.ID); err != nil {
+		t.Fatal(err)
+	}
+	order := store.SMSOrder{
+		ID:               "SREPLSYNC",
+		UserID:           u.ID,
+		UpstreamProvider: "hero",
+		Country:          "9",
+		Service:          "tg",
+		UpstreamCost:     .5,
+		PriceFen:         199,
+		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
+	}
+	if err = db.CreateSMS(u, order); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.ActivateSMS(order.ID, "old-upstream", "66000000001", .5); err != nil {
+		t.Fatal(err)
+	}
+	if claimed, err := db.ClaimAutoReplace(order.ID, "old-upstream"); err != nil || !claimed {
+		t.Fatalf("claim=%v err=%v", claimed, err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "getStatus":
+			_, _ = w.Write([]byte("STATUS_CANCEL"))
+		default:
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
+	defer upstream.Close()
+	s := New(config.Config{HeroKey: "key", HeroURL: upstream.URL, HeroCurrency: "840"}, db)
+	current, err := db.GetSMS(order.ID, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := s.syncOrderForUser(t.Context(), u.ID, current)
+	if got.Status != "replacing" {
+		t.Fatalf("status=%s, want replacing", got.Status)
+	}
+	refreshed, err := db.GetSMS(order.ID, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshed.Status != "replacing" {
+		t.Fatalf("db status=%s, want replacing", refreshed.Status)
+	}
+}
+
+func TestRunAutoReplaceFulfillPaidOrder(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "run-paid.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	u, _, err := db.Register("paid-batch@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	order := store.SMSOrder{
+		ID:               "SPAIDRUN",
+		UserID:           u.ID,
+		UpstreamProvider: "hero",
+		UpstreamCountry:  "7",
+		UpstreamService:  "fb",
+		Country:          "7",
+		Service:          "fb",
+		UpstreamCost:     .0399,
+		PriceFen:         100,
+		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
+	}
+	recharge := store.Recharge{
+		ID:        "PPAIDRUN",
+		UserID:    u.ID,
+		AmountFen: 100,
+		Provider:  "epay",
+		PayType:   "2",
+		Token:     "token",
+		Reference: order.ID,
+		CreatedAt: order.CreatedAt,
+	}
+	if err = db.CreateSMSPayment(u, order, recharge); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.DB.Exec("UPDATE sms_orders SET status='paid' WHERE id=?", order.ID); err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "getNumberV2":
+			_ = json.NewEncoder(w).Encode(map[string]any{"activationId": "hero-paid-id", "phoneNumber": "60111111111", "activationCost": .0399})
+		default:
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
+	defer upstream.Close()
+	s := New(config.Config{HeroKey: "key", HeroURL: upstream.URL, HeroCurrency: "840"}, db)
+	s.runPaidOrderBatch(t.Context())
+	got, err := db.GetSMS(order.ID, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "waiting" || got.UpstreamID != "hero-paid-id" || got.Phone != "60111111111" {
+		t.Fatalf("unexpected paid activation: %+v", got)
+	}
+}
+
+func TestPublicCatalogPrefersHigherStockBeforeLowerPrice(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "catalog-stock-priority.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "getCountries":
+			_, _ = w.Write([]byte(`{"7":{"id":7,"eng":"Malaysia","chn":"马来西亚"},"9":{"id":9,"eng":"Thailand","chn":"泰国"}}`))
+		case "getServicesList":
+			_, _ = w.Write([]byte(`{"services":[{"code":"fb","name":"Facebook"}]}`))
+		case "getPrices":
+			_, _ = w.Write([]byte(`{"7":{"fb":{"cost":0.02,"count":12}},"9":{"fb":{"cost":0.01,"count":3}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+	server := New(config.Config{HeroKey: "hero", HeroURL: upstream.URL, HeroCurrency: "840", USDCNY: 7.2, Markup: 1}, db)
+	handler := server.Routes()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/catalog", nil)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("catalog status=%d body=%s", res.Code, res.Body.String())
+	}
+	var payload struct {
+		Offers []struct {
+			Service  string `json:"service"`
+			Country  string `json:"country"`
+			Count    int    `json:"count"`
+			PriceFen int64  `json:"priceFen"`
+		} `json:"offers"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Offers) != 2 {
+		t.Fatalf("offers=%+v, want both country offers in public catalog", payload.Offers)
+	}
+	bestCountry := ""
+	bestCount := -1
+	for _, offer := range payload.Offers {
+		if offer.Count > bestCount {
+			bestCount = offer.Count
+			bestCountry = offer.Country
+		}
+	}
+	if bestCountry != "7" || bestCount != 12 {
+		t.Fatalf("offers=%+v, want Malaysia to be the highest-stock route", payload.Offers)
 	}
 }
 
