@@ -86,7 +86,7 @@ func (s *Server) Routes() http.Handler {
 	m := http.NewServeMux()
 	sub, _ := fs.Sub(assets, "public")
 	m.HandleFunc("GET /healthz", s.health)
-	m.Handle("/", http.FileServer(http.FS(sub)))
+	m.Handle("/", s.publicFiles(http.FS(sub)))
 	m.HandleFunc("POST /api/auth/register", s.register)
 	m.HandleFunc("GET /api/auth/config", s.authConfig)
 	m.HandleFunc("POST /api/auth/email-code", s.sendEmailCode)
@@ -100,6 +100,7 @@ func (s *Server) Routes() http.Handler {
 	m.HandleFunc("GET /api/orders/{id}", s.auth(s.orderStatus))
 	m.HandleFunc("GET /api/orders/{id}/checkout", s.auth(s.orderCheckout))
 	m.HandleFunc("POST /api/orders/{id}/finish", s.auth(s.finishOrder))
+	m.HandleFunc("POST /api/orders/{id}/resend", s.auth(s.resendCode))
 	m.HandleFunc("POST /api/orders/{id}/replace", s.auth(s.manualReplace))
 	m.HandleFunc("POST /api/orders/{id}/cancel", s.auth(s.cancel))
 	m.HandleFunc("GET /api/settings", s.publicSettings)
@@ -117,6 +118,7 @@ func (s *Server) Routes() http.Handler {
 	m.HandleFunc("GET /api/admin/users", s.admin(s.adminUsers))
 	m.HandleFunc("PATCH /api/admin/users/{userID}", s.admin(s.adminUpdateUser))
 	m.HandleFunc("GET /api/admin/orders", s.admin(s.adminOrders))
+	m.HandleFunc("GET /api/admin/orders/{id}/logs", s.admin(s.adminOrderLogs))
 	m.HandleFunc("POST /api/admin/orders/{id}/close", s.admin(s.adminCloseOrder))
 	m.HandleFunc("GET /api/admin/payments", s.admin(s.adminPayments))
 	m.HandleFunc("GET /api/admin/email-logs", s.admin(s.adminEmailLogs))
@@ -148,6 +150,19 @@ func security(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+func (s *Server) publicFiles(fsys http.FileSystem) http.Handler {
+	files := http.FileServer(fsys)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if path == "/" || strings.HasSuffix(strings.ToLower(path), ".html") {
+			w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+			w.Header().Set("Pragma", "no-cache")
+			w.Header().Set("Expires", "0")
+		}
+		files.ServeHTTP(w, r)
+	})
+}
+
 func jsonOut(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("content-type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
@@ -180,7 +195,7 @@ func (s *Server) auth(next handler) http.HandlerFunc {
 	}
 }
 func setSession(w http.ResponseWriter, token string, secure bool) {
-	http.SetCookie(w, &http.Cookie{Name: "session", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: secure, MaxAge: 30 * 86400})
+	http.SetCookie(w, &http.Cookie{Name: "session", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: secure, MaxAge: 24 * 60 * 60})
 }
 func (s *Server) authConfig(w http.ResponseWriter, r *http.Request) {
 	email := s.effectiveEmailVerification()
@@ -411,9 +426,13 @@ func (s *Server) serveCatalog(w http.ResponseWriter, r *http.Request) {
 		Count    int    `json:"count"`
 		PriceFen int64  `json:"priceFen"`
 	}
-	po := make([]priced, 0, len(snapshot.Quotes))
+	sourceOffers := snapshot.Offers
+	if len(sourceOffers) == 0 {
+		sourceOffers = quoteListFromMap(snapshot.Quotes)
+	}
+	po := make([]priced, 0, len(sourceOffers))
 	markup := s.effectivePricing().Markup
-	for _, quote := range snapshot.Quotes {
+	for _, quote := range sourceOffers {
 		po = append(po, priced{Service: quote.Service, Country: quote.Country, Count: quote.Count, PriceFen: quote.priceFen(markup)})
 	}
 	jsonOut(w, 200, map[string]any{"countries": snapshot.Countries, "services": snapshot.Services, "offers": po})
@@ -614,22 +633,26 @@ func parseHeroStatus(st string) (string, string) {
 	return strings.ToLower(strings.TrimPrefix(p[0], "STATUS_")), ""
 }
 func (s *Server) finishOrder(w http.ResponseWriter, r *http.Request, u store.User) {
-	o, e := s.Store.GetSMS(r.PathValue("id"), u.ID)
+	orderID := r.PathValue("id")
+	log.Printf("finish requested user=%d order=%s", u.ID, orderID)
+	o, e := s.Store.GetSMS(orderID, u.ID)
 	if e != nil {
+		log.Printf("finish missing user=%d order=%s err=%v", u.ID, orderID, e)
 		fail(w, 404, "订单不存在")
 		return
 	}
 	o = s.syncOrderForUser(r.Context(), u.ID, o)
 	if o.Status != "waiting" && o.Status != "code_received" {
-		fail(w, 409, "order cannot be completed in its current state")
+		log.Printf("finish invalid-state user=%d order=%s status=%s", u.ID, orderID, o.Status)
+		fail(w, 409, "当前状态不能完成订单")
 		return
 	}
 	if o.UpstreamProvider == "smsman" {
-		fail(w, 409, "finish is unavailable for this provider")
+		fail(w, 409, "当前渠道暂不支持完成订单")
 		return
 	}
 	if o.UpstreamID == "" {
-		fail(w, 409, "upstream activation is missing")
+		fail(w, 409, "缺少上游激活记录")
 		return
 	}
 	result, err := s.Hero.SetStatus(r.Context(), o.UpstreamID, "6")
@@ -639,7 +662,7 @@ func (s *Server) finishOrder(w http.ResponseWriter, r *http.Request, u store.Use
 	}
 	normalized := strings.ToUpper(strings.Trim(strings.TrimSpace(result), `"`))
 	if normalized != "ACCESS_READY" && normalized != "ACCESS_ACTIVATION" && normalized != "STATUS_OK" && normalized != "FINISHED" && !strings.Contains(normalized, "READY") {
-		fail(w, 409, "upstream did not confirm completion")
+		fail(w, 409, "上游未确认完成")
 		return
 	}
 	_ = s.Store.EndCurrentAttemptWithProvider(o.ID, o.UpstreamProvider, o.UpstreamID, "finished")
@@ -652,6 +675,54 @@ func (s *Server) finishOrder(w http.ResponseWriter, r *http.Request, u store.Use
 		fail(w, 500, err)
 		return
 	}
+	log.Printf("finish completed user=%d order=%s status=%s", u.ID, o.ID, updated.Status)
+	jsonOut(w, 200, updated)
+}
+
+func (s *Server) resendCode(w http.ResponseWriter, r *http.Request, u store.User) {
+	o, e := s.Store.GetSMS(r.PathValue("id"), u.ID)
+	if e != nil {
+		fail(w, 404, "订单不存在")
+		return
+	}
+	o = s.syncOrderForUser(r.Context(), u.ID, o)
+	if o.Status != "waiting" && o.Status != "code_received" {
+		fail(w, 409, "当前状态不支持重新发送验证码")
+		return
+	}
+	if o.UpstreamProvider == "smsman" {
+		fail(w, 409, "当前渠道暂不支持重新发送验证码")
+		return
+	}
+	if o.UpstreamID == "" {
+		fail(w, 409, "缺少上游激活记录")
+		return
+	}
+	result, err := s.Hero.SetStatus(r.Context(), o.UpstreamID, "3")
+	if err != nil {
+		fail(w, 409, err)
+		return
+	}
+	normalized := strings.ToUpper(strings.Trim(strings.TrimSpace(result), `"`))
+	if normalized != "" &&
+		!strings.Contains(normalized, "RETRY") &&
+		!strings.Contains(normalized, "RESEND") &&
+		!strings.Contains(normalized, "WAIT") &&
+		normalized != "STATUS_OK" &&
+		normalized != "OK" {
+		fail(w, 409, "上游未确认重新发送")
+		return
+	}
+	if err = s.Store.ResetSMSCode(o.ID, "waiting"); err != nil {
+		fail(w, 500, err)
+		return
+	}
+	updated, err := s.Store.GetSMS(o.ID, u.ID)
+	if err != nil {
+		fail(w, 500, err)
+		return
+	}
+	log.Printf("resend completed user=%d order=%s status=%s", u.ID, o.ID, updated.Status)
 	jsonOut(w, 200, updated)
 }
 

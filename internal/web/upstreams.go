@@ -35,6 +35,7 @@ func (q providerQuote) priceFen(markup float64) int64 {
 type catalogSnapshot struct {
 	Countries []hero.Country
 	Services  []hero.Service
+	Offers    []providerQuote
 	Quotes    map[string]providerQuote
 }
 
@@ -156,7 +157,7 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 	if country == "" {
 		return s.loadGlobalCatalog(ctx)
 	}
-	snapshot := catalogSnapshot{Quotes: map[string]providerQuote{}}
+	snapshot := catalogSnapshot{Offers: []providerQuote{}, Quotes: map[string]providerQuote{}}
 	quoteCandidates := map[string][]providerQuote{}
 	livePricing := s.effectivePricing()
 	var heroErr error
@@ -187,6 +188,7 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 			return catalogSnapshot{}, heroErr
 		}
 		snapshot.Quotes = cheapestQuoteMap(quoteCandidates, livePricing)
+		snapshot.Offers = quoteListFromMap(snapshot.Quotes)
 		return snapshot, nil
 	}
 
@@ -227,6 +229,7 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 			return catalogSnapshot{}, heroErr
 		}
 		snapshot.Quotes = cheapestQuoteMap(quoteCandidates, livePricing)
+		snapshot.Offers = quoteListFromMap(snapshot.Quotes)
 		return snapshot, nil
 	}
 	smsQuotes, err := s.SMSCache.countryQuotes(ctx, s.SMSMan, smsCountryID)
@@ -251,6 +254,7 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 		quoteCandidates[service.Code] = append(quoteCandidates[service.Code], candidate)
 	}
 	snapshot.Quotes = cheapestQuoteMap(quoteCandidates, livePricing)
+	snapshot.Offers = quoteListFromMap(snapshot.Quotes)
 	if heroErr != nil && len(snapshot.Quotes) == 0 {
 		return catalogSnapshot{}, heroErr
 	}
@@ -342,7 +346,7 @@ func (s *Server) loadGlobalCatalog(ctx context.Context) (catalogSnapshot, error)
 	}
 	providers.Wait()
 
-	snapshot := catalogSnapshot{Quotes: map[string]providerQuote{}}
+	snapshot := catalogSnapshot{Offers: []providerQuote{}, Quotes: map[string]providerQuote{}}
 	quoteCandidates := map[string][]providerQuote{}
 	if heroErr == nil {
 		snapshot.Countries, snapshot.Services = heroCountries, heroServices
@@ -392,11 +396,57 @@ func (s *Server) loadGlobalCatalog(ctx context.Context) (catalogSnapshot, error)
 			}
 		}
 	}
-	snapshot.Quotes = balancedQuoteMap(quoteCandidates, pricing)
+	snapshot.Offers = countryServiceQuoteList(quoteCandidates, pricing)
+	snapshot.Quotes = recommendedQuoteMap(snapshot.Offers, pricing)
 	if heroErr != nil && smsErr != nil {
 		return catalogSnapshot{}, fmt.Errorf("catalog providers unavailable: %v; %v", heroErr, smsErr)
 	}
 	return snapshot, nil
+}
+
+func countryServiceQuoteList(candidates map[string][]providerQuote, pricing livePricing) []providerQuote {
+	type key struct {
+		service string
+		country string
+	}
+	best := map[key]providerQuote{}
+	for service, items := range candidates {
+		for _, item := range items {
+			if item.Count <= 0 {
+				continue
+			}
+			composite := key{service: service, country: item.Country}
+			current, exists := best[composite]
+			if !exists || item.priceFen(pricing.Markup) < current.priceFen(pricing.Markup) || (item.priceFen(pricing.Markup) == current.priceFen(pricing.Markup) && item.Count > current.Count) {
+				best[composite] = item
+			}
+		}
+	}
+	out := make([]providerQuote, 0, len(best))
+	for _, item := range best {
+		out = append(out, item)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Service == out[j].Service {
+			if out[i].priceFen(pricing.Markup) == out[j].priceFen(pricing.Markup) {
+				return out[i].Count > out[j].Count
+			}
+			return out[i].priceFen(pricing.Markup) < out[j].priceFen(pricing.Markup)
+		}
+		return out[i].Service < out[j].Service
+	})
+	return out
+}
+
+func recommendedQuoteMap(offers []providerQuote, pricing livePricing) map[string]providerQuote {
+	out := map[string]providerQuote{}
+	for _, item := range offers {
+		current, exists := out[item.Service]
+		if !exists || item.priceFen(pricing.Markup) < current.priceFen(pricing.Markup) || (item.priceFen(pricing.Markup) == current.priceFen(pricing.Markup) && item.Count > current.Count) {
+			out[item.Service] = item
+		}
+	}
+	return out
 }
 
 func balancedQuoteMap(candidates map[string][]providerQuote, pricing livePricing) map[string]providerQuote {
@@ -436,6 +486,14 @@ func cheapestQuoteMap(candidates map[string][]providerQuote, pricing livePricing
 				out[service] = item
 			}
 		}
+	}
+	return out
+}
+
+func quoteListFromMap(quotes map[string]providerQuote) []providerQuote {
+	out := make([]providerQuote, 0, len(quotes))
+	for _, item := range quotes {
+		out = append(out, item)
 	}
 	return out
 }

@@ -7,3 +7,18 @@
 .orders-table th:nth-child(4),.orders-table td:nth-child(4){max-width:120px}
 .order-email-cell,.order-phone-cell{overflow:hidden;text-overflow:ellipsis}
 .order-action-cell{min-width:108px}
+.order-action-group{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.order-log-dialog{width:min(760px,calc(100vw - 32px));border:0;border-radius:18px;padding:0;background:#fff;box-shadow:0 25px 70px #244a7e2a}
+.order-log-dialog::backdrop{background:#0f1f3a66;backdrop-filter:blur(4px)}
+.order-log-head{display:flex;justify-content:space-between;align-items:center;padding:20px 22px;border-bottom:1px solid #e7edf5}
+.order-log-head h3{margin:0;font-size:20px}
+.order-log-body{padding:18px 22px 22px;max-height:min(70vh,720px);overflow:auto;display:grid;gap:12px}
+.order-log-item{display:grid;grid-template-columns:170px 1fr;gap:14px;padding:14px 0;border-bottom:1px solid #edf2f8}
+.order-log-item:last-child{border-bottom:0}
+.order-log-time{color:#7d899c;font-size:12px;padding-top:2px}
+.order-log-content strong{display:block;font-size:14px;color:#15233d}
+.order-log-content p{margin:6px 0 0;color:#5f6d84;white-space:pre-wrap;word-break:break-word}
+.order-log-payment strong{color:#2464ff}
+.order-log-refund strong{color:#18a36c}
+.order-log-audit strong{color:#8a57ff}
+@media(max-width:760px){.order-log-item{grid-template-columns:1fr}.order-log-time{padding-top:0}}

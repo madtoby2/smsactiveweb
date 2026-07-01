@@ -47,11 +47,15 @@
     linear-gradient(135deg, rgba(255,255,255,.98), rgba(239,246,255,.94)),
     radial-gradient(circle at top right, rgba(39,98,255,.16), transparent 52%);
   box-shadow: 0 18px 40px rgba(39, 67, 124, 0.12);
-  opacity: 0;
-  transform: translateY(12px) scale(.985);
-  animation: authPreviewFade .55s cubic-bezier(.22, 1, .36, 1) forwards;
+  opacity: 1;
+  transform: none;
+  transition: box-shadow .22s ease, border-color .22s ease, transform .22s ease;
 }
-.auth-preview-block:nth-child(2) { animation-delay: .08s; }
+.auth-preview-block:hover {
+  border-color: #c8d9ff;
+  box-shadow: 0 22px 46px rgba(39, 67, 124, 0.16);
+  transform: translateY(-1px);
+}
 .auth-preview-title {
   margin-bottom: 10px;
   color: #2b4778;
@@ -60,12 +64,12 @@
   letter-spacing: .08em;
 }
 .auth-preview-grid {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
 }
 .auth-preview-item {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
@@ -106,16 +110,15 @@
 }
 .auth-preview-chips {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(38px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 12px;
 }
 .auth-preview-flag {
   width: 100%;
-  max-width: 48px;
+  max-width: none;
   height: 40px;
   display: inline-grid;
   place-items: center;
-  justify-self: center;
   border: 1px solid #d9e5ff;
   border-radius: 12px;
   background: #fbfcff;
@@ -137,12 +140,6 @@
   font-size: 12px;
   line-height: 1.65;
   padding: 4px 0;
-}
-@keyframes authPreviewFade {
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
 }
 .cookie-consent {
   position: fixed;
@@ -192,6 +189,13 @@ body.cookie-consent-open .auth-card { margin-bottom: 160px; }
 @media (max-width: 720px) {
   .auth-preview {
     margin-top: 24px;
+  }
+  .auth-preview-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .auth-preview-chips {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
   }
   .cookie-consent {
     left: 16px;

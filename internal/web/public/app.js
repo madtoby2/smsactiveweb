@@ -1,7 +1,25 @@
 ﻿const $ = selector => document.querySelector(selector);
-const state = {register: false, user: null, offers: [], services: [], countries: [], orders: [], selectedService: '', liveSmsPurchaseEnabled: false, authConfig: {emailVerificationRequired: false, emailVerificationAvailable: false, turnstileSiteKey: ''}, turnstileWidget: null};
+const state = {
+  register: false,
+  user: null,
+  offers: [],
+  services: [],
+  allServices: [],
+  countries: [],
+  orders: [],
+  selectedService: '',
+  selectedCountry: '',
+  liveSmsPurchaseEnabled: false,
+  authConfig: {emailVerificationRequired: false, emailVerificationAvailable: false, turnstileSiteKey: ''},
+  turnstileWidget: null,
+  previewHydrated: false,
+  globalCatalog: {countries: [], services: [], offers: []},
+  countryCatalog: null,
+  countryCatalogLoading: false,
+  countryRequestSerial: 0,
+};
 const COOKIE_CONSENT_KEY = 'cookieConsentChoice';
-const CATALOG_CACHE_KEY = 'catalogCacheV1';
+const CATALOG_CACHE_KEY = 'catalogCacheV2';
 const CATALOG_CACHE_TTL = 5 * 60 * 1000;
 
 async function api(path, options = {}) {
@@ -62,6 +80,16 @@ function formatPhoneNumber(value, country) {
     return `+63 (${digits.slice(2, 5)}) ${digits.slice(5)}`;
   }
   return raw;
+}
+function splitPhoneNumber(value, country) {
+  const formatted = formatPhoneNumber(value, country);
+  const match = formatted.match(/^(\+\d+(?:\s*\(\d+\))?)(?:\s+)(.+)$/);
+  if (match) return {prefix: match[1], number: match[2]};
+  const digits = String(value ?? '').replace(/\D/g, '');
+  if (digits.length > 4) {
+    return {prefix: digits.slice(0, Math.min(4, digits.length - 4)), number: digits.slice(Math.min(4, digits.length - 4))};
+  }
+  return {prefix: '', number: formatted};
 }
 function serviceDisplayName(code) {
   const key = String(code ?? '').trim();
@@ -132,10 +160,8 @@ function countryFlagCode(value, country) {
 function countryFlagMarkup(country) {
   const title = country?.chn || country?.eng || countryName(country?.id) || '全球';
   const code = countryFlagCode(country?.id, country).toLowerCase();
-  const src = code !== 'gl' ? `/flags/${code}.svg` : '';
-  return src
-    ? `<span class="auth-preview-flag" title="${escapeHTML(title)}" aria-label="${escapeHTML(title)}"><img src="${src}" alt=""></span>`
-    : `<span class="auth-preview-flag" title="${escapeHTML(title)}" aria-label="${escapeHTML(title)}">GL</span>`;
+  if (code === 'gl') return '';
+  return `<span class="auth-preview-flag" title="${escapeHTML(title)}" aria-label="${escapeHTML(title)}"><img src="/flags/${code}.svg" alt=""></span>`;
 }
 function canReplaceOrder(order) {
   return order?.Status === 'waiting';
@@ -149,8 +175,15 @@ function canFinishOrder(order) {
   return order?.Status === 'waiting' || order?.Status === 'code_received';
 }
 
+function canResendCode(order) {
+  return order?.Status === 'code_received';
+}
+
 function canContinuePayment(order) {
   return order?.Status === 'awaiting_payment';
+}
+function canRefreshOrder(order) {
+  return ['paid', 'purchasing', 'waiting', 'replacing', 'code_received'].includes(order?.Status);
 }
 function shouldRevealOrderPhone(order) {
   return ['waiting', 'replacing', 'code_received', 'finished'].includes(order?.Status);
@@ -160,7 +193,8 @@ function isRecentActiveOrder(order) {
   if (!Number.isFinite(createdAt)) return true;
   return (Date.now() - createdAt) <= 24 * 60 * 60 * 1000;
 }
-function orderPhoneKey(order) { return `${order.ID}:${order.Phone}`; }
+function orderId(order) { return String(order?.id ?? order?.ID ?? '').trim(); }
+function orderPhoneKey(order) { return `${orderId(order)}:${order.Phone}`; }
 function activePhoneOrder(order) { return order.Phone && ['waiting', 'replacing', 'code_received'].includes(order.Status); }
 function notifiedPhoneKeys() {
   try { return new Set(JSON.parse(localStorage.getItem('phoneNotified') || '[]')); } catch { return new Set(); }
@@ -187,7 +221,10 @@ async function copyText(text) {
 }
 function showPhoneModal(order) {
   if (!order?.Phone) return;  $('#phoneModalMeta').textContent = `${serviceDisplayName(order.Service)} · ${orderCountryName(order)}`;
-  $('#phoneModalNumber').textContent = formatPhoneNumber(order.Phone, order.Country);
+  const parts = splitPhoneNumber(order.Phone, order.Country);
+  $('#phoneModalNumber').innerHTML = parts.prefix
+    ? `<span class="phone-prefix">${escapeHTML(parts.prefix)}</span><span class="phone-main">${escapeHTML(parts.number)}</span>`
+    : `<span class="phone-main">${escapeHTML(parts.number)}</span>`;
   $('#phoneModalCopy').onclick = async () => {
     try {
       await copyText(order.Phone);
@@ -315,22 +352,48 @@ function writeCatalogCache(country = '', data) {
   } catch {}
 }
 
-function applyCatalogData(data, preserveCountries = false) {
-  const countries = data.countries || [];
+function applyGlobalCatalogData(data) {
+  const countries = (data.countries || []).filter(country => country.visible !== 0);
   const services = data.services || [];
   const offers = data.offers || [];
-  if (!preserveCountries || countries.length) {
-    state.countries = countries;
-    $('#country').innerHTML = '<option value="">不限国家（自动推荐）</option>' + countries
-      .filter(country => country.visible !== 0)
-      .map(country => `<option value="${country.id}">${escapeHTML(country.chn || country.eng)} · ${escapeHTML(country.eng)}</option>`)
-      .join('');
-  }
+  state.globalCatalog = {countries, services, offers};
+  state.countries = countries;
+  state.allServices = services;
   state.services = services;
   state.offers = offers;
-  if (!state.offers.some(offer => offer.service === state.selectedService)) state.selectedService = '';
   renderAuthPreview();
-  renderServices();
+}
+
+function selectableCountries() {
+  const selectedService = String(state.selectedService || '').trim();
+  const countries = state.globalCatalog.countries || [];
+  if (!selectedService) return countries;
+  const available = new Set((state.globalCatalog.offers || []).filter(offer => String(offer.service) === selectedService).map(offer => String(offer.country)));
+  return countries.filter(country => available.has(String(country.id)));
+}
+
+function syncSelectionState() {
+  const countries = selectableCountries();
+  return countries;
+}
+
+function renderCountryOptions(countries = selectableCountries()) {
+  const countrySelect = $('#country');
+  if (!countrySelect) return;
+  const selectedCountry = String(state.selectedCountry || '').trim();
+  countrySelect.innerHTML = '<option value="">不限国家（自动推荐）</option>' + countries
+    .map(country => {
+      const primary = country.chn || country.eng || countryName(country.id);
+      return `<option value="${country.id}">${escapeHTML(primary)}</option>`;
+    })
+    .join('');
+  if (selectedCountry && countries.some(country => String(country.id) === selectedCountry)) {
+    countrySelect.value = selectedCountry;
+    return;
+  }
+  if (!selectedCountry) {
+    countrySelect.value = '';
+  }
 }
 
 function servicePreviewCandidates(limit = 8) {
@@ -357,47 +420,13 @@ function servicePreviewNote(code, name) {
 }
 
 function renderAuthPreview() {
-  const serviceBox = $('#authServicePreview');
-  const countryBox = $('#authCountryPreview');
-  if (!serviceBox || !countryBox) return;
-
-  const previewServices = servicePreviewCandidates().filter(service => service?.code && service?.name);
-  if (previewServices.length) {
-    serviceBox.innerHTML = previewServices.map(service => `<span class="auth-preview-item">${serviceIcon(service.code, service.name)}<span><b>${escapeHTML(service.name)}</b><small>${escapeHTML(service.note || servicePreviewNote(service.code, service.name))}</small></span></span>`).join('');
-  }
-
-  const preferredCountries = [
-    {id: 'cn', chn: '中国', eng: 'China'},
-    {id: '12', chn: '美国', eng: 'United States'},
-    {id: '11', chn: '日本', eng: 'Japan'},
-    {id: '4', chn: '菲律宾', eng: 'Philippines'},
-    {id: '7', chn: '马来西亚', eng: 'Malaysia'},
-    {id: 'id', chn: '印度尼西亚', eng: 'Indonesia'},
-    {id: 'in', chn: '印度', eng: 'India'},
-    {id: 'th', chn: '泰国', eng: 'Thailand'},
-    {id: 'vn', chn: '越南', eng: 'Vietnam'},
-    {id: 'kr', chn: '韩国', eng: 'South Korea'},
-    {id: 'au', chn: '澳大利亚', eng: 'Australia'},
-    {id: 'gb', chn: '英国', eng: 'United Kingdom'},
-    {id: 'sg', chn: '新加坡', eng: 'Singapore'},
-    {id: 'ca', chn: '加拿大', eng: 'Canada'},
-    {id: 'de', chn: '德国', eng: 'Germany'},
-    {id: 'fr', chn: '法国', eng: 'France'},
-    {id: 'br', chn: '巴西', eng: 'Brazil'},
-    {id: 'mx', chn: '墨西哥', eng: 'Mexico'},
-    {id: 'tr', chn: '土耳其', eng: 'Turkey'},
-    {id: 'za', chn: '南非', eng: 'South Africa'},
-  ];
-  const previewCountries = preferredCountries;
-  if (previewCountries.length) {
-    countryBox.innerHTML = previewCountries.map(countryFlagMarkup).join('');
-  }
+  return;
 }
 
 async function boot() {
   loadAnnouncements().catch(() => {});
   await loadAuthConfig().catch(() => {});
-  await loadCatalog({background: true}).catch(() => {});
+  await loadCatalog().catch(() => {});
   renderAuthPreview();
   try {
     const me = await api('/api/me');
@@ -628,55 +657,131 @@ $('#profileClose').onclick = closeProfile;
 $('#profileModal').onclick = event => { if (event.target === $('#profileModal')) closeProfile(); };
 document.addEventListener('keydown', event => { if (event.key === 'Escape') closeProfile(); });
 
-async function loadCatalog(options = {}) {
-  const rawCountry = options.country ?? $('#country').value ?? '';
-  const country = /^\d+$/.test(String(rawCountry).trim()) ? String(rawCountry).trim() : '';
-  const cached = readCatalogCache(country);
-  if (cached) {
-    applyCatalogData(cached, country !== '');
+async function loadCatalog() {
+  const data = await api('/api/catalog');
+  applyGlobalCatalogData(data);
+  if (state.selectedCountry) {
+    await loadCountryCatalog(state.selectedCountry);
+  } else {
+    renderServices();
   }
-  const path = country ? `/api/catalog?country=${encodeURIComponent(country)}` : '/api/catalog';
+  return data;
+}
+
+async function loadCountryCatalog(countryID) {
+  const selectedCountry = String(countryID || '').trim();
+  state.countryRequestSerial += 1;
+  const requestID = state.countryRequestSerial;
+  if (!selectedCountry) {
+    state.countryCatalog = null;
+    state.countryCatalogLoading = false;
+    renderServices();
+    return null;
+  }
+  state.countryCatalogLoading = true;
+  renderServices();
   try {
-    const data = await api(path);
-    applyCatalogData(data, country !== '');
-    writeCatalogCache(country, data);
+    const data = await api(`/api/catalog?country=${encodeURIComponent(selectedCountry)}`);
+    if (requestID !== state.countryRequestSerial) return null;
+    state.countryCatalog = {
+      country: selectedCountry,
+      countries: data.countries || [],
+      services: data.services || [],
+      offers: data.offers || [],
+    };
     return data;
-  } catch (error) {
-    if (cached) return cached;
-    throw error;
+  } finally {
+    if (requestID === state.countryRequestSerial) {
+      state.countryCatalogLoading = false;
+      renderServices();
+    }
   }
 }
+
 $('#country').onchange = async () => {
-  $('#service').innerHTML = '<div class="service-loading">载入中...</div>';
-  await loadCatalog({country: $('#country').value});
+  state.selectedCountry = String($('#country').value || '').trim();
+  await loadCountryCatalog(state.selectedCountry);
 };
 $('#search').oninput = renderServices;
 
+function effectiveOffers() {
+  if (state.selectedCountry && state.countryCatalog?.country === state.selectedCountry) {
+    return state.countryCatalog.offers || [];
+  }
+  if (!state.selectedCountry) return state.globalCatalog.offers || [];
+  return (state.globalCatalog.offers || []).filter(offer => String(offer.country) === state.selectedCountry);
+}
+
+function visibleOffers() {
+  return effectiveOffers();
+}
+
+function effectiveServices() {
+  return state.allServices.length ? state.allServices : (state.globalCatalog.services || []);
+}
+
 function renderServices() {
+  const list = $('#service');
+  const previousScrollTop = list.scrollTop;
   const query = $('#search').value.toLowerCase();
-  const available = new Map(state.offers.map(offer => [offer.service, offer]));
-  const catalogServices = state.services.filter(service => available.has(service.code));
-  const services = catalogServices
-    .filter(service => (`${service.name} ${service.code}`).toLowerCase().includes(query));
-  $('#service').innerHTML = services.length ? services.map(service => `<button type="button" class="service-option${state.selectedService === service.code ? ' selected' : ''}" data-service="${escapeHTML(service.code)}" role="option" aria-selected="${state.selectedService === service.code}">${serviceIcon(service.code, service.name)}<span><b>${escapeHTML(service.name)}</b><small>${escapeHTML(service.code)}</small></span></button>`).join('') : '<div class="service-loading">没有可用服务</div>';
+  const countries = syncSelectionState();
+  const offers = effectiveOffers();
+  const available = new Map(offers.map(offer => [offer.service, offer]));
+  const sourceServices = effectiveServices();
+  const services = state.selectedService
+    ? sourceServices.filter(service => service.code === state.selectedService)
+    : sourceServices
+        .filter(service => !state.selectedCountry || available.has(service.code))
+        .filter(service => (`${service.name} ${service.code}`).toLowerCase().includes(query));
+  list.innerHTML = services.length ? services.map(service => {
+    return `<button type="button" class="service-option${state.selectedService === service.code ? ' selected' : ''}" data-service="${escapeHTML(service.code)}" role="option" aria-selected="${state.selectedService === service.code}">${serviceIcon(service.code, service.name)}<span><b>${escapeHTML(service.name)}</b><small>${escapeHTML(service.code)}</small></span></button>`;
+  }).join('') : `<div class="service-loading">${state.countryCatalogLoading ? '正在加载服务...' : (state.selectedCountry ? '当前国家暂无可用服务' : '暂无可用服务')}</div>`;
   document.querySelectorAll('.service-option').forEach(button => button.onclick = () => selectService(button.dataset.service));
+  requestAnimationFrame(() => { list.scrollTop = previousScrollTop; });
+  renderCountryOptions(countries);
+  updateSelectedServiceMeta();
   selectOffer();
 }
 function selectService(code) {
   state.selectedService = code;
   renderServices();
 }
+function updateSelectedServiceMeta() {
+  const meta = $('#selectedServiceMeta');
+  if (!meta) return;
+  if (!state.selectedService) {
+    meta.classList.add('hidden');
+    meta.innerHTML = '';
+    return;
+  }
+  const service = state.services.find(item => item.code === state.selectedService) || state.allServices.find(item => item.code === state.selectedService);
+  const offer = visibleOffers().find(item => item.service === state.selectedService) || state.offers.find(item => item.service === state.selectedService);
+  const name = service?.name || serviceDisplayName(state.selectedService);
+  const note = offer
+    ? (state.selectedCountry ? '当前国家可下单' : '已锁定当前服务，请选择国家查看报价')
+    : (state.selectedCountry ? '该国家下暂无库存，请切换国家' : '请选择支持该服务的国家');
+  meta.classList.remove('hidden');
+  meta.innerHTML = `${serviceIcon(state.selectedService, name)}<span><b>当前选择：${escapeHTML(name)}</b><small>${escapeHTML(note)}</small></span><button id="clearSelectedService" class="secondary service-clear" type="button">重新选择</button>`;
+  $('#clearSelectedService').onclick = () => {
+    state.selectedService = '';
+    renderServices();
+  };
+}
 function selectOffer() {
-  const offer = state.offers.find(item => item.service === state.selectedService);
+  const offer = visibleOffers().find(item => item.service === state.selectedService) || null;
+  $('#buy').textContent = state.liveSmsPurchaseEnabled ? '支付并取号' : '支付取号演示模式';
   $('#buy').disabled = !offer || !state.liveSmsPurchaseEnabled;
-  $('#price').textContent = offer ? money(offer.priceFen) : '请选择服务';
+  $('#price').textContent = state.selectedService ? (offer ? money(offer.priceFen) : (state.selectedCountry ? '该国家下暂无库存' : '请选择国家查看报价')) : '请选择服务';
   const cheapestCountry = offer ? Array.from($('#country').options).find(option => option.value === String(offer.country))?.textContent || offer.country : '';
-  const scope = offer && !$('#country').value ? ` · 推荐国家 ${cheapestCountry}` : '';
+  const scope = offer && !state.selectedCountry ? ` · 推荐国家 ${cheapestCountry}` : '';
   $('#stock').textContent = offer
     ? (state.liveSmsPurchaseEnabled
       ? `实时库存 ${offer.count} 个${scope}`
       : `实时库存 ${offer.count} 个${scope} · 演示环境`)
-    : '';
+    : (state.selectedService
+      ? (state.selectedCountry ? '该国家下当前服务暂无库存，请切换其他国家继续查看' : '请选择国家查看该服务报价')
+      : '');
+  updateSelectedServiceMeta();
 }
 
 $('#buy').onclick = async () => {
@@ -684,7 +789,7 @@ $('#buy').onclick = async () => {
   button.disabled = true;
   button.textContent = '正在创建支付订单...';
   try {
-    const order = await api('/api/orders', {method: 'POST', body: JSON.stringify({Country: $('#country').value, Service: state.selectedService, payType: Number($('#payType').value)})});
+    const order = await api('/api/orders', {method: 'POST', body: JSON.stringify({Country: state.selectedCountry, Service: state.selectedService, payType: Number($('#payType').value)})});
     toast(`本单应付 ${money(order.priceFen)}，正在前往支付`);
     location.href = order.checkoutUrl;
   } catch (error) {
@@ -705,12 +810,12 @@ function renderOrders() {
   box.innerHTML = recentOrders.map(order => {
     const serviceName = serviceDisplayName(order.Service);
     const replaceText = ['waiting', 'replacing', 'code_received'].includes(order.Status) ? replaceAttemptsText(order.ReplaceAttempts) : '';
-    const displayPhone = order.Phone ? formatPhoneNumber(order.Phone, order.Country) : '';
+    const phoneParts = order.Phone ? splitPhoneNumber(order.Phone, order.Country) : null;
     const phone = order.Phone && shouldRevealOrderPhone(order)
-      ? `<button class="phone-pill show-phone" type="button" data-id="${order.ID}" title="\u67e5\u770b\u53f7\u7801">${escapeHTML(displayPhone)}</button><button class="copy-phone" type="button" data-phone="${escapeHTML(displayPhone)}">\u590d\u5236</button>`
+      ? `<button class="phone-pill show-phone" type="button" data-id="${escapeHTML(orderId(order))}" title="\u67e5\u770b\u53f7\u7801">${phoneParts?.prefix ? `<span class="phone-prefix">${escapeHTML(phoneParts.prefix)}</span>` : ''}<span class="phone-main">${escapeHTML(phoneParts?.number || '')}</span></button><button class="copy-phone" type="button" data-phone="${escapeHTML(formatPhoneNumber(order.Phone, order.Country))}">\u590d\u5236</button>`
       : `<b>${escapeHTML(serviceName)}</b>`;
     const continueButton = canContinuePayment(order)
-      ? iconActionButton('continue-pay', order.ID, '继续支付', `
+      ? iconActionButton('continue-pay', orderId(order), '继续支付', `
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M13 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
             <path d="M4 12h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
@@ -718,7 +823,7 @@ function renderOrders() {
         `)
       : '';
     const replaceButton = canReplaceOrder(order)
-      ? iconActionButton('replace-one', order.ID, '更换号码', `
+      ? iconActionButton('replace-one', orderId(order), '更换号码', `
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M4 7h12a4 4 0 0 1 0 8H7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
             <path d="M7 11l-4 4 4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -726,16 +831,24 @@ function renderOrders() {
         `)
       : '';
     const cancelButton = canCancelOrder(order)
-      ? iconActionButton('cancel-one', order.ID, '取消购买', `
+      ? iconActionButton('cancel-one', orderId(order), '取消购买', `
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M6 6l12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
           </svg>
         `)
       : '';
     const finishButton = canFinishOrder(order)
-      ? iconActionButton('finish-one', order.ID, '完成', `
+      ? iconActionButton('finish-one', orderId(order), '完成', `
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        `)
+      : '';
+    const resendButton = canResendCode(order)
+      ? iconActionButton('resend-one', orderId(order), '重新发送验证码', `
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 11a8 8 0 0 1 13.66-5.66L20 7.5V4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M20 13a8 8 0 0 1-13.66 5.66L4 16.5V20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         `)
       : '';
@@ -745,19 +858,23 @@ function renderOrders() {
     const validityTag = ['waiting', 'replacing', 'code_received'].includes(order.Status)
       ? '<small class="order-validity">20 分钟有效</small>'
       : '';
-    return `<article class="order"><div class="order-service">${serviceIcon(order.Service, serviceName)}<span><span class="${order.Phone ? 'order-phone' : ''}">${phone}</span><small>${escapeHTML(orderCountryName(order))}${replaceText}</small></span></div><div><span class="badge">${status(order.Status)}</span>${refundTag}<small>${new Date(order.CreatedAt).toLocaleString()}</small>${validityTag}</div><div>${order.Code ? `<code>${escapeHTML(order.Code)}</code>` : '<small>\u7b49\u5f85\u9a8c\u8bc1\u7801</small>'}<b>${money(order.PriceFen)}</b></div><div class="order-actions">${continueButton}${iconActionButton('refresh-one', order.ID, '刷新', `
+    const refreshButton = canRefreshOrder(order)
+      ? iconActionButton('refresh-one', orderId(order), '刷新', `
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="M20 11a8 8 0 1 0 2 5.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
         <path d="M20 4v7h-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-    `)}${replaceButton}${cancelButton}${finishButton}</div></article>`;
+    `)
+      : '';
+    return `<article class="order"><div class="order-service">${serviceIcon(order.Service, serviceName)}<span><span class="${order.Phone ? 'order-phone' : ''}">${phone}</span><small>${escapeHTML(orderCountryName(order))}${replaceText}</small></span></div><div><span class="badge">${status(order.Status)}</span>${refundTag}<small>${new Date(order.CreatedAt).toLocaleString()}</small>${validityTag}</div><div>${order.Code ? `<code>${escapeHTML(order.Code)}</code>` : '<small>\u7b49\u5f85\u9a8c\u8bc1\u7801</small>'}<b>${money(order.PriceFen)}</b></div><div class="order-actions">${continueButton}${refreshButton}${replaceButton}${cancelButton}${resendButton}${finishButton}</div></article>`;
   }).join('');
   document.querySelectorAll('.continue-pay').forEach(button => button.onclick = () => continuePayment(button.dataset.id));
   document.querySelectorAll('.refresh-one').forEach(button => button.onclick = () => refreshOrder(button.dataset.id));
   document.querySelectorAll('.replace-one').forEach(button => button.onclick = () => manualReplace(button.dataset.id));
   document.querySelectorAll('.cancel-one').forEach(button => button.onclick = () => cancelOrder(button.dataset.id));
+  document.querySelectorAll('.resend-one').forEach(button => button.onclick = () => resendCode(button.dataset.id));
   document.querySelectorAll('.finish-one').forEach(button => button.onclick = () => finishOrder(button.dataset.id));
-  document.querySelectorAll('.show-phone').forEach(button => button.onclick = () => showPhoneModal(state.orders.find(order => String(order.ID) === button.dataset.id)));
+  document.querySelectorAll('.show-phone').forEach(button => button.onclick = () => showPhoneModal(state.orders.find(order => orderId(order) === button.dataset.id)));
   document.querySelectorAll('.copy-phone').forEach(button => button.onclick = async () => {
     try {
       await copyText(button.dataset.phone);
@@ -776,9 +893,10 @@ function status(value) {
 }
 async function refreshOrder(id) {
   try {
-    await api(`/api/orders/${id}`);
     await loadOrders();
-    toast('\u8ba2\u5355\u5df2\u5237\u65b0');
+    const order = state.orders.find(item => orderId(item) === String(id));
+    if (order) toast(order.Code ? '验证码已同步' : '订单状态已刷新');
+    else toast('订单列表已同步');
   } catch (error) {
     toast(error.message);
   }
@@ -822,6 +940,17 @@ async function finishOrder(id) {
     if (!confirmed) return;
     await api(`/api/orders/${id}/finish`, {method: 'POST'});
     toast('订单已完成');
+    await loadOrders();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+async function resendCode(id) {
+  try {
+    const confirmed = window.confirm('重新发送验证码会向上游请求新的短信，并继续等待新的验证码。确认继续吗？');
+    if (!confirmed) return;
+    await api(`/api/orders/${id}/resend`, {method: 'POST'});
+    toast('已请求重新发送验证码');
     await loadOrders();
   } catch (error) {
     toast(error.message);

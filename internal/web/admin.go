@@ -3,6 +3,7 @@ package web
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"fmt"
 	"net/http"
 	netmail "net/mail"
@@ -645,6 +646,24 @@ func (s *Server) adminOrders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, 200, orders)
+}
+
+func (s *Server) adminOrderLogs(w http.ResponseWriter, r *http.Request) {
+	orderID := strings.TrimSpace(r.PathValue("id"))
+	if orderID == "" {
+		fail(w, 400, "invalid order id")
+		return
+	}
+	logs, err := s.Store.AdminOrderLogs(orderID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			fail(w, 404, "order not found")
+			return
+		}
+		fail(w, 500, err)
+		return
+	}
+	jsonOut(w, 200, logs)
 }
 
 func (s *Server) adminCloseOrder(w http.ResponseWriter, r *http.Request) {

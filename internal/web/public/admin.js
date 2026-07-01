@@ -1,5 +1,5 @@
 const $ = selector => document.querySelector(selector);
-const adminState = {view: "dashboard", userId: 0, threads: [], announcements: []};
+const adminState = {view: "dashboard", userId: 0, threads: [], announcements: [], orderLogID: ""};
 
 async function request(path, options = {}) {
   const response = await fetch(path, {credentials: "same-origin", headers: {"content-type": "application/json"}, ...options});
@@ -109,7 +109,12 @@ function orderRows(orders) {
         <td>${money(order.priceFen)}</td>
         <td>${status(order.status)}</td>
         <td>${date(order.createdAt)}</td>
-        <td class="order-action-cell">${closableOrder(order) ? `<button class="action danger order-close" data-id="${order.id}">\u5173\u95ed\u8ba2\u5355</button>` : "-"}</td>
+        <td class="order-action-cell">
+          <div class="order-action-group">
+            <button class="action order-log" data-id="${order.id}">\u67e5\u770b\u65e5\u5fd7</button>
+            ${closableOrder(order) ? `<button class="action danger order-close" data-id="${order.id}">\u5173\u95ed\u8ba2\u5355</button>` : ""}
+          </div>
+        </td>
       </tr>`).join("")
     : '<tr><td colspan="9" class="muted">\u6682\u65e0\u8ba2\u5355</td></tr>';
 }
@@ -142,9 +147,34 @@ function renderBalance(id, item) {
 async function loadOrders() {
   const query = new URLSearchParams({q: $("#orderQuery").value, status: $("#orderStatus").value});
   $("#allOrders").innerHTML = orderRows(await request(`/api/admin/orders?${query}`));
+  document.querySelectorAll(".order-log").forEach(button => button.onclick = () => openOrderLogs(button.dataset.id));
   document.querySelectorAll(".order-close").forEach(button => button.onclick = () => closeOrder(button));
 }
 $("#searchOrders").onclick = loadOrders;
+
+async function openOrderLogs(orderID) {
+  adminState.orderLogID = orderID;
+  $("#orderLogTitle").textContent = `\u8ba2\u5355\u65e5\u5fd7 ${orderID}`;
+  $("#orderLogBody").innerHTML = '<div class="muted">\u8bfb\u53d6\u4e2d...</div>';
+  $("#orderLogDialog").showModal();
+  try {
+    const logs = await request(`/api/admin/orders/${orderID}/logs`);
+    $("#orderLogBody").innerHTML = logs.length
+      ? logs.map(item => `
+        <article class="order-log-item order-log-${esc(item.type)}">
+          <div class="order-log-time">${date(item.time)}</div>
+          <div class="order-log-content">
+            <strong>${esc(item.title)}</strong>
+            <p>${esc(item.detail || "-")}</p>
+          </div>
+        </article>`).join("")
+      : '<div class="muted">\u6682\u65e0\u53ef\u7528\u65e5\u5fd7</div>';
+  } catch (error) {
+    $("#orderLogBody").innerHTML = `<div class="error">${esc(error.message)}</div>`;
+  }
+}
+
+$("#closeOrderLog").onclick = () => $("#orderLogDialog").close();
 
 async function closeOrder(button) {
   if (!confirm("\u786e\u8ba4\u5173\u95ed\u8fd9\u4e2a\u8ba2\u5355\uff1f\u7cfb\u7edf\u4f1a\u5c1d\u8bd5\u53d6\u6d88\u4e0a\u6e38\u53f7\u7801\uff0c\u5e76\u6309\u8bbe\u5b9a\u89c4\u5219\u539f\u8def\u9000\u6b3e\u3002")) return;

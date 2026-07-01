@@ -9,6 +9,8 @@ import (
 	"errors"
 	_ "modernc.org/sqlite"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -110,6 +112,12 @@ type AdminPayment struct {
 	CreatedAt  string `json:"createdAt"`
 	AmountFen  int64  `json:"amountFen"`
 }
+type AdminOrderLogEntry struct {
+	Time   string `json:"time"`
+	Type   string `json:"type"`
+	Title  string `json:"title"`
+	Detail string `json:"detail"`
+}
 type Announcement struct {
 	ID        int64  `json:"id"`
 	Title     string `json:"title"`
@@ -152,7 +160,7 @@ func providerOrHero(provider string) string {
 	return provider
 }
 
-const sessionLifetime = 30 * 24 * time.Hour
+const sessionLifetime = 24 * time.Hour
 
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll("data", 0700); err != nil {
@@ -474,7 +482,7 @@ func (s *Store) UserByToken(raw string) (User, error) {
 }
 func (s *Store) TouchSession(raw string) error {
 	h := sha256.Sum256([]byte(raw))
-	_, e := s.DB.Exec(`UPDATE sessions SET expires_at=? WHERE token_hash=? AND expires_at>? AND expires_at<?`, time.Now().Add(sessionLifetime).UTC().Format(time.RFC3339), hex.EncodeToString(h[:]), time.Now().UTC().Format(time.RFC3339), time.Now().Add(15*24*time.Hour).UTC().Format(time.RFC3339))
+	_, e := s.DB.Exec(`UPDATE sessions SET expires_at=? WHERE token_hash=? AND expires_at>? AND expires_at<?`, time.Now().Add(sessionLifetime).UTC().Format(time.RFC3339), hex.EncodeToString(h[:]), time.Now().UTC().Format(time.RFC3339), time.Now().Add(12*time.Hour).UTC().Format(time.RFC3339))
 	return e
 }
 func (s *Store) DeleteSession(raw string) error {
@@ -609,6 +617,10 @@ func (s *Store) GetSMSByID(id string) (SMSOrder, error) {
 }
 func (s *Store) UpdateSMS(id, status, code string) error {
 	_, e := s.DB.Exec("UPDATE sms_orders SET status=?,code=CASE WHEN ?='' THEN code ELSE ? END WHERE id=?", status, code, code, id)
+	return e
+}
+func (s *Store) ResetSMSCode(id, status string) error {
+	_, e := s.DB.Exec("UPDATE sms_orders SET status=?,code='' WHERE id=?", status, id)
 	return e
 }
 func (s *Store) ListSMS(uid int64) ([]SMSOrder, error) {
@@ -1139,6 +1151,176 @@ func (s *Store) AdminOrders(query, status string) ([]AdminOrder, error) {
 	return orders, rows.Err()
 }
 
+func (s *Store) AdminOrderLogs(orderID string) ([]AdminOrderLogEntry, error) {
+	orderID = strings.TrimSpace(orderID)
+	if orderID == "" {
+		return nil, sql.ErrNoRows
+	}
+	var (
+		orderCreated string
+		orderStatus  string
+		orderCode    string
+		orderPhone   string
+	)
+	err := s.DB.QueryRow(`SELECT created_at,status,COALESCE(code,''),COALESCE(phone,'') FROM sms_orders WHERE id=?`, orderID).
+		Scan(&orderCreated, &orderStatus, &orderCode, &orderPhone)
+	if err != nil {
+		return nil, err
+	}
+	logs := []AdminOrderLogEntry{{
+		Time:   orderCreated,
+		Type:   "order",
+		Title:  "订单创建",
+		Detail: "订单已创建，等待支付或后续处理",
+	}}
+
+	rows, err := s.DB.Query(`SELECT created_at,status,provider,pay_type,amount_fen,COALESCE(provider_id,''),COALESCE(refund_provider_id,''),COALESCE(refunded_at,'')
+		FROM recharges WHERE reference=? ORDER BY created_at`, orderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var createdAt, status, provider, payType, providerID, refundProviderID, refundedAt string
+		var amountFen int64
+		if err = rows.Scan(&createdAt, &status, &provider, &payType, &amountFen, &providerID, &refundProviderID, &refundedAt); err != nil {
+			return nil, err
+		}
+		detail := "通道：" + provider + " / 方式：" + payType + " / 金额：" + formatFen(amountFen)
+		if providerID != "" {
+			detail += " / 支付流水号：" + providerID
+		}
+		logs = append(logs, AdminOrderLogEntry{
+			Time:   createdAt,
+			Type:   "payment",
+			Title:  "支付单创建",
+			Detail: detail,
+		})
+		if status == "paid" || status == "refunded" {
+			logs = append(logs, AdminOrderLogEntry{
+				Time:   createdAt,
+				Type:   "payment",
+				Title:  "支付成功",
+				Detail: detailOrDefault(providerID, detail),
+			})
+		}
+		statusTitle := map[string]string{
+			"pending":  "等待支付",
+			"paid":     "支付成功",
+			"failed":   "支付失败",
+			"refunded": "已原路退款",
+		}[status]
+		if statusTitle == "" {
+			statusTitle = "支付状态：" + status
+		}
+		if status != "paid" {
+			logs = append(logs, AdminOrderLogEntry{
+				Time:   createdAt,
+				Type:   "payment",
+				Title:  statusTitle,
+				Detail: detail,
+			})
+		}
+		if refundedAt != "" {
+			refundDetail := "退款已完成"
+			if refundProviderID != "" {
+				refundDetail += " / 退款流水号：" + refundProviderID
+			}
+			logs = append(logs, AdminOrderLogEntry{
+				Time:   refundedAt,
+				Type:   "refund",
+				Title:  "原路退款成功",
+				Detail: refundDetail,
+			})
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+
+	rows, err = s.DB.Query(`SELECT upstream_provider,upstream_id,phone,status,upstream_cost,started_at,COALESCE(ended_at,'')
+		FROM sms_attempts WHERE order_id=? ORDER BY started_at,id`, orderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var provider, upstreamID, phone, status, startedAt, endedAt string
+		var upstreamCost float64
+		if err = rows.Scan(&provider, &upstreamID, &phone, &status, &upstreamCost, &startedAt, &endedAt); err != nil {
+			return nil, err
+		}
+		logs = append(logs, AdminOrderLogEntry{
+			Time:   startedAt,
+			Type:   "attempt",
+			Title:  "号码分配",
+			Detail: "上游：" + provider + " / 上游单号：" + upstreamID + " / 号码：" + phone + " / 成本：" + strconv.FormatFloat(upstreamCost, 'f', 3, 64),
+		})
+		if endedAt != "" {
+			statusTitle := map[string]string{
+				"finished":  "本次尝试已完成",
+				"cancelled": "本次尝试已取消",
+				"waiting":   "本次尝试等待中",
+			}[status]
+			if statusTitle == "" {
+				statusTitle = "本次尝试状态：" + status
+			}
+			logs = append(logs, AdminOrderLogEntry{
+				Time:   endedAt,
+				Type:   "attempt",
+				Title:  statusTitle,
+				Detail: "上游：" + provider + " / 上游单号：" + upstreamID,
+			})
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+
+	rows, err = s.DB.Query(`SELECT action,COALESCE(detail,''),created_at FROM admin_audit WHERE target=? ORDER BY created_at`, orderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var action, detail, createdAt string
+		if err = rows.Scan(&action, &detail, &createdAt); err != nil {
+			return nil, err
+		}
+		logs = append(logs, AdminOrderLogEntry{
+			Time:   createdAt,
+			Type:   "audit",
+			Title:  orderAuditTitle(action),
+			Detail: detailOrDefault(detail, "后台记录"),
+		})
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+
+	finalDetail := "当前状态：" + orderStatus
+	if orderPhone != "" {
+		finalDetail += " / 当前号码：" + orderPhone
+	}
+	if orderCode != "" {
+		finalDetail += " / 验证码：" + orderCode
+	}
+	logs = append(logs, AdminOrderLogEntry{
+		Time:   time.Now().UTC().Format(time.RFC3339),
+		Type:   "snapshot",
+		Title:  "当前订单快照",
+		Detail: finalDetail,
+	})
+
+	sort.SliceStable(logs, func(i, j int) bool {
+		if logs[i].Time == logs[j].Time {
+			return logs[i].Title < logs[j].Title
+		}
+		return logs[i].Time < logs[j].Time
+	})
+	return logs, nil
+}
+
 func (s *Store) AdminCloseAwaitingPayment(id, reason string) error {
 	tx, err := s.DB.Begin()
 	if err != nil {
@@ -1255,4 +1437,29 @@ func (s *Store) AuditEvents() ([]AuditEvent, error) {
 		events = append(events, event)
 	}
 	return events, rows.Err()
+}
+
+func formatFen(fen int64) string {
+	return "¥" + strconv.FormatFloat(float64(fen)/100, 'f', 2, 64)
+}
+
+func orderAuditTitle(action string) string {
+	switch action {
+	case "order.close":
+		return "管理员关闭订单"
+	case "order.close.refunded":
+		return "管理员关闭并退款"
+	case "order.close.refund_skipped":
+		return "管理员关闭，退款被风控拦截"
+	default:
+		return action
+	}
+}
+
+func detailOrDefault(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
 }

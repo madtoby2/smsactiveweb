@@ -1,13 +1,22 @@
 package web
 
 import (
+	"encoding/base64"
 	"context"
+	crand "crypto/rand"
+	"crypto"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -175,6 +184,59 @@ func TestCatalogIsPubliclyAccessible(t *testing.T) {
 	}
 	if !strings.Contains(res.Body.String(), "\"countries\"") || !strings.Contains(res.Body.String(), "\"services\"") {
 		t.Fatalf("catalog response=%s", res.Body.String())
+	}
+}
+
+func TestPublicCatalogReturnsFullCountryServiceMatrix(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "catalog-matrix.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "getCountries":
+			_, _ = w.Write([]byte(`{"7":{"id":7,"eng":"Malaysia","chn":"马来西亚"},"9":{"id":9,"eng":"Thailand","chn":"泰国"}}`))
+		case "getServicesList":
+			_, _ = w.Write([]byte(`{"services":[{"code":"tg","name":"Telegram"}]}`))
+		case "getPrices":
+			_, _ = w.Write([]byte(`{"7":{"tg":{"cost":0.2,"count":4}},"9":{"tg":{"cost":0.3,"count":6}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+	server := New(config.Config{HeroKey: "hero", HeroURL: upstream.URL, HeroCurrency: "840", USDCNY: 7.2, Markup: 1}, db)
+	handler := server.Routes()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/catalog", nil)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("catalog status=%d body=%s", res.Code, res.Body.String())
+	}
+	var payload struct {
+		Offers []struct {
+			Service string `json:"service"`
+			Country string `json:"country"`
+			Count   int    `json:"count"`
+		} `json:"offers"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Offers) != 2 {
+		t.Fatalf("offers=%+v, want 2 entries for the same service across two countries", payload.Offers)
+	}
+	countries := map[string]int{}
+	for _, offer := range payload.Offers {
+		if offer.Service != "tg" {
+			t.Fatalf("unexpected service in offers: %+v", payload.Offers)
+		}
+		countries[offer.Country] = offer.Count
+	}
+	if countries["7"] != 4 || countries["9"] != 6 {
+		t.Fatalf("countries=%v, want map[7:4 9:6]", countries)
 	}
 }
 
@@ -527,6 +589,75 @@ func TestAdminCanConfigureResendWithoutReadingKeyBack(t *testing.T) {
 	}
 }
 
+func TestAdminOrderLogsIncludesAttemptsAndRefunds(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "admin-order-logs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	u, _, err := db.Register("orderlogs@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	order := store.SMSOrder{
+		ID:               "SORDERLOG",
+		UserID:           u.ID,
+		Country:          "7",
+		CountryName:      "马来西亚",
+		Service:          "dr",
+		UpstreamProvider: "hero",
+		UpstreamCountry:  "7",
+		UpstreamService:  "dr",
+		UpstreamCost:     .1,
+		PriceFen:         120,
+		CreatedAt:        now,
+	}
+	payment := store.Recharge{
+		ID:        "PORDERLOG",
+		UserID:    u.ID,
+		AmountFen: 120,
+		Provider:  "epay",
+		PayType:   "2",
+		Token:     "token",
+		Reference: order.ID,
+		CreatedAt: now,
+	}
+	if err = db.CreateSMSPayment(u, order, payment); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.CompleteSMSPayment(payment.ID, "trade-order-log"); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.ActivateSMSWithProvider(order.ID, "hero", "hero-log-1", "60110000000", .1); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.UpdateSMS(order.ID, "code_received", "855362"); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.MarkRechargeRefunded(payment.ID, "refund-log-1"); err != nil {
+		t.Fatal(err)
+	}
+	db.Audit("order.close.refunded", order.ID, "refund-log-1")
+	adminToken, _ := store.Token()
+	if err = db.CreateAdminSession(adminToken); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/orders/SORDERLOG/logs", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: adminToken})
+	w := httptest.NewRecorder()
+	New(config.Config{}, db).Routes().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, want := range []string{`"订单创建"`, `"支付成功"`, `"号码分配"`, `"原路退款成功"`, `"管理员关闭并退款"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %s in %s", want, body)
+		}
+	}
+}
+
 func TestAutoReplaceDoesNotAcquireWithoutCancellationConfirmation(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "cancel-confirmation.db"))
 	if err != nil {
@@ -595,7 +726,7 @@ func TestAuthenticatedRequestRefreshesPersistentSessionCookie(t *testing.T) {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 	cookies := w.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != "session" || cookies[0].HttpOnly != true || cookies[0].MaxAge != 30*86400 {
+	if len(cookies) != 1 || cookies[0].Name != "session" || cookies[0].HttpOnly != true || cookies[0].MaxAge != 24*60*60 {
 		t.Fatalf("unexpected session cookies: %+v", cookies)
 	}
 }
@@ -885,8 +1016,72 @@ func TestGlobalRecommendedQuotePurchasesItsCountryWithoutCountrySelection(t *tes
 		t.Fatal(err)
 	}
 	order, err := db.GetSMSByID(checkout.ID)
-	if err != nil || order.Country != "6" || order.UpstreamCountry != "6" || checkout.PriceFen != 460 {
+	if err != nil || order.Country != "7" || order.UpstreamCountry != "7" || checkout.PriceFen != 245 {
 		t.Fatalf("order=%+v price=%d err=%v", order, checkout.PriceFen, err)
+	}
+}
+
+func TestPurchaseUsesExplicitSelectedCountryQuote(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "selected-country-purchase.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "getCountries":
+			_, _ = w.Write([]byte(`{"7":{"id":7,"eng":"Malaysia","chn":"马来西亚"},"9":{"id":9,"eng":"Thailand","chn":"泰国"}}`))
+		case "getServicesList":
+			if country := r.URL.Query().Get("country"); country != "" && country != "9" {
+				t.Fatalf("unexpected selected country for services=%q", country)
+			}
+			_, _ = w.Write([]byte(`{"services":[{"code":"tg","name":"Telegram"}]}`))
+		case "getPrices":
+			country := r.URL.Query().Get("country")
+			if country == "" {
+				_, _ = w.Write([]byte(`{"7":{"tg":{"cost":0.2,"count":4}},"9":{"tg":{"cost":0.3,"count":6}}}`))
+				return
+			}
+			if country != "9" {
+				t.Fatalf("unexpected selected country for prices=%q", country)
+			}
+			_, _ = w.Write([]byte(`{"9":{"tg":{"cost":0.3,"count":6}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+	server := New(config.Config{HeroKey: "hero", HeroURL: upstream.URL, HeroCurrency: "840", USDCNY: 7.2, Markup: 1, PayProvider: "sandbox", AllowLiveSMSInSandbox: true}, db)
+	handler := server.Routes()
+	_, session, err := db.Register("selected-country@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/orders", strings.NewReader(`{"Country":"9","Service":"tg","payType":2}`))
+	request.Header.Set("content-type", "application/json")
+	request.AddCookie(&http.Cookie{Name: "session", Value: session})
+	result := httptest.NewRecorder()
+	handler.ServeHTTP(result, request)
+	if result.Code != http.StatusCreated {
+		t.Fatalf("purchase status=%d body=%s", result.Code, result.Body.String())
+	}
+	var checkout struct {
+		ID       string `json:"id"`
+		PriceFen int64  `json:"priceFen"`
+	}
+	if err = json.NewDecoder(result.Body).Decode(&checkout); err != nil {
+		t.Fatal(err)
+	}
+	order, err := db.GetSMSByID(checkout.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if order.Country != "9" || order.UpstreamCountry != "9" {
+		t.Fatalf("order=%+v, want selected country 9 to be preserved", order)
+	}
+	if checkout.PriceFen != 316 {
+		t.Fatalf("price=%d, want 316", checkout.PriceFen)
 	}
 }
 
@@ -1164,6 +1359,236 @@ func TestFinishOrderMarksHeroOrderFinished(t *testing.T) {
 	}
 }
 
+func TestCancelOrderRefundsPaidWaitingOrder(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "cancel-refund.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	u, token, err := db.Register("cancelrefund@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	o := store.SMSOrder{
+		ID:               "SCANCELREFUND",
+		UserID:           u.ID,
+		Country:          "4",
+		CountryName:      "菲律宾",
+		Service:          "dr",
+		UpstreamProvider: "hero",
+		UpstreamCountry:  "4",
+		UpstreamService:  "dr",
+		UpstreamCost:     .1,
+		PriceFen:         120,
+		CreatedAt:        now,
+	}
+	payment := store.Recharge{
+		ID:        "PCANCELREFUND",
+		UserID:    u.ID,
+		AmountFen: 120,
+		Provider:  "epay",
+		PayType:   "2",
+		Token:     "token",
+		Reference: o.ID,
+		CreatedAt: now,
+	}
+	if err = db.CreateSMSPayment(u, o, payment); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.CompleteSMSPayment(payment.ID, "trade-cancel-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.ActivateSMSWithProvider(o.ID, "hero", "hero-cancel-1", "639551234567", .1); err != nil {
+		t.Fatal(err)
+	}
+	platformPublic, platformPrivate := testRSAKeyPair(t)
+	_, merchantPrivate := testRSAKeyPair(t)
+	var refundCalled bool
+	var refundTradeNo, refundOutNo, refundMoney string
+	var heroCancelCalls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/pay/refund":
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			refundCalled = true
+			refundTradeNo = r.Form.Get("trade_no")
+			refundOutNo = r.Form.Get("out_refund_no")
+			refundMoney = r.Form.Get("money")
+			payload := map[string]any{
+				"code":          0,
+				"msg":           "success",
+				"trade_no":      refundTradeNo,
+				"out_refund_no": refundOutNo,
+				"money":         refundMoney,
+				"timestamp":     strconv.FormatInt(time.Now().Unix(), 10),
+			}
+			signature := testRefundSignature(t, platformPrivate, payload)
+			payload["sign"] = signature
+			payload["sign_type"] = "RSA"
+			_ = json.NewEncoder(w).Encode(payload)
+		case r.URL.Query().Get("action") == "setStatus":
+			heroCancelCalls++
+			_, _ = w.Write([]byte("ACCESS_CANCEL"))
+		default:
+			http.Error(w, "unexpected action", http.StatusBadRequest)
+		}
+	}))
+	defer upstream.Close()
+	h := New(config.Config{
+		HeroKey:                "key",
+		HeroURL:                upstream.URL,
+		HeroCurrency:           "840",
+		EPayPID:                "1001",
+		EPayURL:                upstream.URL,
+		EPayPlatformPublicKey:  platformPublic,
+		EPayMerchantPrivateKey: merchantPrivate,
+	}, db).Routes()
+	req := httptest.NewRequest(http.MethodPost, "/api/orders/SCANCELREFUND/cancel", nil)
+	req.AddCookie(&http.Cookie{Name: "session", Value: token})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+	}
+	if !refundCalled || refundTradeNo != "trade-cancel-1" || refundMoney != "1.20" {
+		t.Fatalf("refundCalled=%v trade=%q money=%q", refundCalled, refundTradeNo, refundMoney)
+	}
+	if !strings.Contains(w.Body.String(), `"refunded":true`) {
+		t.Fatalf("missing refunded flag: %s", w.Body.String())
+	}
+	got, err := db.GetSMS(o.ID, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "cancelled" || !got.Refunded || heroCancelCalls != 1 {
+		t.Fatalf("order=%+v heroCancelCalls=%d", got, heroCancelCalls)
+	}
+	recharge, err := db.GetRechargeByReference(o.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recharge.Status != "refunded" || recharge.RefundProviderID != refundOutNo || recharge.RefundedAt == "" {
+		t.Fatalf("recharge=%+v", recharge)
+	}
+}
+
+func TestAdminCloseRefundsPaidWaitingOrder(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "admin-close-refund.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	u, _, err := db.Register("admincloserefund@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	o := store.SMSOrder{
+		ID:               "SADMINCLOSE",
+		UserID:           u.ID,
+		Country:          "4",
+		CountryName:      "菲律宾",
+		Service:          "dr",
+		UpstreamProvider: "hero",
+		UpstreamCountry:  "4",
+		UpstreamService:  "dr",
+		UpstreamCost:     .1,
+		PriceFen:         120,
+		CreatedAt:        now,
+	}
+	payment := store.Recharge{
+		ID:        "PADMINCLOSE",
+		UserID:    u.ID,
+		AmountFen: 120,
+		Provider:  "50pay",
+		PayType:   "2",
+		Token:     "token",
+		Reference: o.ID,
+		CreatedAt: now,
+	}
+	if err = db.CreateSMSPayment(u, o, payment); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.CompleteSMSPayment(payment.ID, "trade-admin-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.ActivateSMSWithProvider(o.ID, "hero", "hero-admin-1", "639551234568", .1); err != nil {
+		t.Fatal(err)
+	}
+	adminToken, _ := store.Token()
+	if err = db.CreateAdminSession(adminToken); err != nil {
+		t.Fatal(err)
+	}
+	platformPublic, platformPrivate := testRSAKeyPair(t)
+	_, merchantPrivate := testRSAKeyPair(t)
+	var refundCalled bool
+	var refundOutNo string
+	var heroCancelCalls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/pay/refund":
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			refundCalled = true
+			refundOutNo = r.Form.Get("out_refund_no")
+			payload := map[string]any{
+				"code":          0,
+				"msg":           "success",
+				"trade_no":      r.Form.Get("trade_no"),
+				"out_refund_no": refundOutNo,
+				"money":         r.Form.Get("money"),
+				"timestamp":     strconv.FormatInt(time.Now().Unix(), 10),
+			}
+			payload["sign"] = testRefundSignature(t, platformPrivate, payload)
+			payload["sign_type"] = "RSA"
+			_ = json.NewEncoder(w).Encode(payload)
+		case r.URL.Query().Get("action") == "setStatus":
+			heroCancelCalls++
+			_, _ = w.Write([]byte("ACCESS_CANCEL"))
+		default:
+			http.Error(w, "unexpected action", http.StatusBadRequest)
+		}
+	}))
+	defer upstream.Close()
+	h := New(config.Config{
+		HeroKey:                "key",
+		HeroURL:                upstream.URL,
+		HeroCurrency:           "840",
+		EPayPID:                "1001",
+		EPayURL:                upstream.URL,
+		EPayPlatformPublicKey:  platformPublic,
+		EPayMerchantPrivateKey: merchantPrivate,
+	}, db).Routes()
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/orders/SADMINCLOSE/close", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: adminToken})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+	}
+	if !refundCalled || !strings.Contains(w.Body.String(), `"refunded":true`) {
+		t.Fatalf("refundCalled=%v body=%s", refundCalled, w.Body.String())
+	}
+	order, err := db.GetSMSByID(o.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if order.Status != "admin_closed" || !order.Refunded || heroCancelCalls != 1 {
+		t.Fatalf("order=%+v heroCancelCalls=%d", order, heroCancelCalls)
+	}
+	recharge, err := db.GetRechargeByReference(o.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recharge.Status != "refunded" || recharge.RefundProviderID != refundOutNo || recharge.RefundedAt == "" {
+		t.Fatalf("recharge=%+v", recharge)
+	}
+}
+
 func cloneValues(values url.Values) url.Values {
 	clone := make(url.Values, len(values))
 	for key, items := range values {
@@ -1201,6 +1626,32 @@ func TestPublicSEOAndFooterAssets(t *testing.T) {
 			if !strings.Contains(result.Body.String(), want) {
 				t.Fatalf("GET %s missing %q", test.path, want)
 			}
+		}
+	}
+}
+
+func TestHTMLPagesDisableCaching(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "html-cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	h := New(config.Config{}, db).Routes()
+	for _, path := range []string{"/", "/admin.html", "/api.html", "/contact.html", "/cookie.html", "/privacy.html", "/terms.html"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		result := httptest.NewRecorder()
+		h.ServeHTTP(result, req)
+		if result.Code != http.StatusOK {
+			t.Fatalf("GET %s status=%d", path, result.Code)
+		}
+		if got := result.Header().Get("Cache-Control"); got != "no-store, no-cache, must-revalidate" {
+			t.Fatalf("GET %s Cache-Control=%q", path, got)
+		}
+		if got := result.Header().Get("Pragma"); got != "no-cache" {
+			t.Fatalf("GET %s Pragma=%q", path, got)
+		}
+		if got := result.Header().Get("Expires"); got != "0" {
+			t.Fatalf("GET %s Expires=%q", path, got)
 		}
 	}
 }
@@ -1363,4 +1814,61 @@ func TestYishoumiNotifyRejectsWrongAmount(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d, want 400", w.Code)
 	}
+}
+
+func testRSAKeyPair(t *testing.T) (string, string) {
+	t.Helper()
+	key, err := rsa.GenerateKey(crand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})
+	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})
+	return string(publicPEM), string(privatePEM)
+}
+
+func testRefundSignature(t *testing.T, privatePEM string, payload map[string]any) string {
+	t.Helper()
+	block, _ := pem.Decode([]byte(privatePEM))
+	if block == nil {
+		t.Fatal("missing private key block")
+	}
+	keyAny, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, ok := keyAny.(*rsa.PrivateKey)
+	if !ok {
+		t.Fatal("private key is not RSA")
+	}
+	values := url.Values{}
+	for keyName, value := range payload {
+		values.Set(keyName, fmt.Sprint(value))
+	}
+	keys := make([]string, 0, len(values))
+	for keyName := range values {
+		if keyName != "sign" && keyName != "sign_type" && values.Get(keyName) != "" {
+			keys = append(keys, keyName)
+		}
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, keyName := range keys {
+		parts = append(parts, keyName+"="+values.Get(keyName))
+	}
+	message := strings.Join(parts, "&")
+	sum := sha256.Sum256([]byte(message))
+	signature, err := rsa.SignPKCS1v15(crand.Reader, key, crypto.SHA256, sum[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(signature)
 }
