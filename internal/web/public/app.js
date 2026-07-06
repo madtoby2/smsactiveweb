@@ -9,6 +9,7 @@ const state = {
   orders: [],
   selectedService: '',
   selectedCountry: '',
+  selectedRouteMode: 'stable',
   liveSmsPurchaseEnabled: false,
   authConfig: {emailVerificationRequired: false, emailVerificationAvailable: false, turnstileSiteKey: ''},
   turnstileWidget: null,
@@ -717,11 +718,60 @@ function effectiveOffers() {
     return state.countryCatalog.offers || [];
   }
   if (!state.selectedCountry) return state.globalCatalog.offers || [];
-  return (state.globalCatalog.offers || []).filter(offer => String(offer.country) === state.selectedCountry);
+  return [];
+}
+
+function countryQuoteReady() {
+  if (!state.selectedCountry) return false;
+  return !state.countryCatalogLoading && state.countryCatalog?.country === state.selectedCountry;
 }
 
 function visibleOffers() {
   return effectiveOffers();
+}
+
+function serviceOffers() {
+  if (!state.selectedService) return [];
+  return visibleOffers().filter(item => item.service === state.selectedService);
+}
+
+function lowestPriceOffer(items) {
+  if (!items.length) return null;
+  return items.reduce((best, item) => {
+    if (!best) return item;
+    if (item.priceFen !== best.priceFen) return item.priceFen < best.priceFen ? item : best;
+    if ((item.count || 0) !== (best.count || 0)) return (item.count || 0) > (best.count || 0) ? item : best;
+    return item;
+  }, null);
+}
+
+function mostExpensiveOffer(items) {
+  if (!items.length) return null;
+  return items.reduce((best, item) => {
+    if (!best) return item;
+    if (item.priceFen !== best.priceFen) return item.priceFen > best.priceFen ? item : best;
+    if ((item.count || 0) !== (best.count || 0)) return (item.count || 0) > (best.count || 0) ? item : best;
+    return item;
+  }, null);
+}
+
+function fastOffer(items) {
+  if (!items.length) return null;
+  return items.reduce((best, item) => {
+    if (!best) return item;
+    if ((item.count || 0) !== (best.count || 0)) return (item.count || 0) > (best.count || 0) ? item : best;
+    if (item.priceFen !== best.priceFen) return item.priceFen < best.priceFen ? item : best;
+    return item;
+  }, null);
+}
+
+function currentRouteChoice() {
+  const items = serviceOffers();
+  const stable = mostExpensiveOffer(items);
+  const fast = fastOffer(items);
+  const cheapest = lowestPriceOffer(items);
+  const selected = state.selectedRouteMode === 'fast' ? (fast || stable || cheapest) : (stable || fast || cheapest);
+  return {stable, fast, cheapest, selected};
 }
 
 function effectiveServices() {
@@ -752,6 +802,7 @@ function renderServices() {
 }
 function selectService(code) {
   state.selectedService = code;
+  state.selectedRouteMode = 'stable';
   renderServices();
 }
 function updateSelectedServiceMeta() {
@@ -765,9 +816,12 @@ function updateSelectedServiceMeta() {
   const service = state.services.find(item => item.code === state.selectedService) || state.allServices.find(item => item.code === state.selectedService);
   const offer = visibleOffers().find(item => item.service === state.selectedService) || state.offers.find(item => item.service === state.selectedService);
   const name = service?.name || serviceDisplayName(state.selectedService);
-  const note = offer
-    ? (state.selectedCountry ? '当前国家可下单' : '已锁定当前服务，请选择国家查看报价')
-    : (state.selectedCountry ? '该国家下暂无库存，请切换国家' : '请选择支持该服务的国家');
+  const waitingQuote = state.selectedCountry && !countryQuoteReady();
+  const note = waitingQuote
+    ? '正在获取当前国家报价...'
+    : offer
+      ? (state.selectedCountry ? '当前国家可下单' : '已锁定当前服务，请选择国家查看报价')
+      : (state.selectedCountry ? '该国家下暂无库存，请切换国家' : '请选择支持该服务的国家');
   meta.classList.remove('hidden');
   meta.innerHTML = `${serviceIcon(state.selectedService, name)}<span><b>当前选择：${escapeHTML(name)}</b><small>${escapeHTML(note)}</small></span><button id="clearSelectedService" class="secondary service-clear" type="button">重新选择</button>`;
   $('#clearSelectedService').onclick = () => {
@@ -776,19 +830,61 @@ function updateSelectedServiceMeta() {
   };
 }
 function selectOffer() {
-  const offer = visibleOffers().find(item => item.service === state.selectedService) || null;
+  const {stable, fast, cheapest, selected: offer} = currentRouteChoice();
+  const routeOptions = $('#routeOptions');
+  const priceSubtext = $('#priceSubtext');
+  const waitingQuote = Boolean(state.selectedService && state.selectedCountry && !countryQuoteReady());
+  const shouldWaitForCountry = Boolean(state.selectedService && !state.selectedCountry);
   $('#buy').textContent = state.liveSmsPurchaseEnabled ? '支付并取号' : '支付取号演示模式';
-  $('#buy').disabled = !offer || !state.liveSmsPurchaseEnabled;
-  $('#price').textContent = state.selectedService ? (offer ? money(offer.priceFen) : (state.selectedCountry ? '该国家下暂无库存' : '请选择国家查看报价')) : '请选择服务';
-  const cheapestCountry = offer ? Array.from($('#country').options).find(option => option.value === String(offer.country))?.textContent || offer.country : '';
-  const scope = offer && !state.selectedCountry ? ` · 推荐国家 ${cheapestCountry}` : '';
-  $('#stock').textContent = offer
-    ? (state.liveSmsPurchaseEnabled
-      ? `实时库存 ${offer.count} 个${scope}`
-      : `实时库存 ${offer.count} 个${scope} · 演示环境`)
-    : (state.selectedService
-      ? (state.selectedCountry ? '该国家下当前服务暂无库存，请切换其他国家继续查看' : '请选择国家查看该服务报价')
-      : '');
+  $('#buy').disabled = !offer || !state.liveSmsPurchaseEnabled || waitingQuote || shouldWaitForCountry;
+  $('#price').textContent = !state.selectedService
+    ? '请选择服务'
+    : shouldWaitForCountry
+      ? '请选择国家查看报价'
+      : waitingQuote
+        ? '正在获取报价...'
+        : (offer ? money(offer.priceFen) : '该国家下暂无库存');
+  const stableCountry = stable ? Array.from($('#country').options).find(option => option.value === String(stable.country))?.textContent || stable.country : '';
+  const fastCountry = fast ? Array.from($('#country').options).find(option => option.value === String(fast.country))?.textContent || fast.country : '';
+  const cheapestCountry = cheapest ? Array.from($('#country').options).find(option => option.value === String(cheapest.country))?.textContent || cheapest.country : '';
+  if (state.selectedService && state.selectedCountry && !waitingQuote && stable) {
+    if (state.selectedRouteMode === 'fast' && fast) {
+      priceSubtext.textContent = `优先拿号 ${money(fast.priceFen)}${fastCountry ? ` · ${fastCountry}` : ''}`;
+    } else {
+      priceSubtext.textContent = `稳定推荐 ${money(stable.priceFen)}${stableCountry ? ` · ${stableCountry}` : ''}`;
+    }
+    const options = [];
+    options.push(`<button type="button" class="route-option${state.selectedRouteMode === 'stable' ? ' selected' : ''}" data-mode="stable"><strong>稳定推荐 ${money(stable.priceFen)}</strong><small>默认走高价稳定档${stableCountry ? ` · ${escapeHTML(stableCountry)}` : ''}</small></button>`);
+    if (fast) {
+      const helper = cheapest && cheapest.priceFen < fast.priceFen
+        ? `库存优先，其次价格优先${fastCountry ? ` · ${escapeHTML(fastCountry)}` : ''} · 最低可到 ${money(cheapest.priceFen)}${cheapestCountry ? ` / ${escapeHTML(cheapestCountry)}` : ''}`
+        : `库存优先，其次价格优先${fastCountry ? ` · ${escapeHTML(fastCountry)}` : ''}`;
+      options.push(`<button type="button" class="route-option${state.selectedRouteMode === 'fast' ? ' selected' : ''}" data-mode="fast"><strong>优先拿号 ${money(fast.priceFen)}</strong><small>${helper}</small></button>`);
+    }
+    routeOptions.innerHTML = options.join('');
+    routeOptions.classList.toggle('hidden', options.length === 0);
+    routeOptions.querySelectorAll('.route-option').forEach(button => {
+      button.onclick = () => {
+        state.selectedRouteMode = button.dataset.mode || 'stable';
+        selectOffer();
+      };
+    });
+  } else {
+    priceSubtext.textContent = '';
+    routeOptions.innerHTML = '';
+    routeOptions.classList.add('hidden');
+  }
+  $('#stock').textContent = !state.selectedService
+    ? ''
+    : shouldWaitForCountry
+      ? '请选择国家查看该服务报价'
+      : waitingQuote
+        ? '正在获取当前国家库存与报价...'
+        : (offer
+          ? (state.liveSmsPurchaseEnabled
+            ? `实时库存 ${offer.count} 个`
+            : `实时库存 ${offer.count} 个 · 演示环境`)
+          : '该国家下当前服务暂无库存，请切换其他国家继续查看');
   updateSelectedServiceMeta();
 }
 
@@ -797,7 +893,7 @@ $('#buy').onclick = async () => {
   button.disabled = true;
   button.textContent = '正在创建支付订单...';
   try {
-    const order = await api('/api/orders', {method: 'POST', body: JSON.stringify({Country: state.selectedCountry, Service: state.selectedService, payType: Number($('#payType').value)})});
+    const order = await api('/api/orders', {method: 'POST', body: JSON.stringify({Country: state.selectedCountry, Service: state.selectedService, payType: Number($('#payType').value), routeMode: state.selectedRouteMode})});
     toast(`本单应付 ${money(order.priceFen)}，正在前往支付`);
     location.href = order.checkoutUrl;
   } catch (error) {

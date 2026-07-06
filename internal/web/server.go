@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"sms-platform/internal/config"
@@ -32,21 +33,25 @@ import (
 var assets embed.FS
 
 type Server struct {
-	C         config.Config
-	Store     *store.Store
-	Hero      *hero.Client
-	SMSMan    *smsman.Client
-	SMSCache  *smsmanCatalogCache
-	Catalog   *catalogResponseCache
-	YSM       *yishoumi.Client
-	EPay      *epay.Client
-	Mailer    mailer.Sender
-	Turnstile turnstile.Verifier
+	C              config.Config
+	Store          *store.Store
+	Hero           *hero.Client
+	SMSMan         *smsman.Client
+	SMSCache       *smsmanCatalogCache
+	Catalog        *catalogResponseCache
+	ProviderStatus *providerStatusCache
+	YSM            *yishoumi.Client
+	EPay           *epay.Client
+	Mailer         mailer.Sender
+	Turnstile      turnstile.Verifier
 }
 type handler func(http.ResponseWriter, *http.Request, store.User)
 type adminHandler func(http.ResponseWriter, *http.Request)
 
 func New(c config.Config, s *store.Store) *Server {
+	if c.AdminUIPath == "" {
+		c.AdminUIPath = "/console-ym-7f4a9d.html"
+	}
 	if c.AutoReplaceAfter < 2*time.Minute {
 		c.AutoReplaceAfter = 2 * time.Minute
 	}
@@ -76,16 +81,63 @@ func New(c config.Config, s *store.Store) *Server {
 		SMSMan:    smsman.New(c.SMSManToken, c.SMSManURL),
 		SMSCache:  newSMSManCatalogCache(),
 		Catalog:   newCatalogResponseCache(2 * time.Minute),
+		ProviderStatus: newProviderStatusCache(30 * time.Second),
 		YSM:       yishoumi.New(c.YSMAppID, c.YSMSecret, c.YSMURL),
 		EPay:      epay.New(c.EPayPID, c.EPayKey, c.EPayURL, epay.WithRefundKeys(c.EPayPlatformPublicKey, c.EPayMerchantPrivateKey)),
 		Mailer:    sender,
 		Turnstile: turnstile.New(c.TurnstileSecret),
 	}
 }
+
+type providerStatusEntry struct {
+	checkedAt time.Time
+	available bool
+}
+
+type providerStatusCache struct {
+	mu      sync.Mutex
+	ttl     time.Duration
+	entries map[string]providerStatusEntry
+}
+
+func newProviderStatusCache(ttl time.Duration) *providerStatusCache {
+	if ttl <= 0 {
+		ttl = 30 * time.Second
+	}
+	return &providerStatusCache{ttl: ttl, entries: map[string]providerStatusEntry{}}
+}
+
+func (c *providerStatusCache) Get(key string) (providerStatusEntry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[key]
+	if !ok {
+		return providerStatusEntry{}, false
+	}
+	if time.Since(entry.checkedAt) > c.ttl {
+		delete(c.entries, key)
+		return providerStatusEntry{}, false
+	}
+	return entry, true
+}
+
+func (c *providerStatusCache) Set(key string, available bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries[key] = providerStatusEntry{checkedAt: time.Now(), available: available}
+}
+
+func (c *providerStatusCache) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = map[string]providerStatusEntry{}
+}
 func (s *Server) Routes() http.Handler {
 	m := http.NewServeMux()
 	sub, _ := fs.Sub(assets, "public")
 	m.HandleFunc("GET /healthz", s.health)
+	m.HandleFunc("GET /admin.html", s.adminPageNotFound)
+	m.HandleFunc("GET "+s.C.AdminUIPath, s.hiddenAdminPage)
 	m.Handle("/", s.publicFiles(http.FS(sub)))
 	m.HandleFunc("POST /api/auth/register", s.register)
 	m.HandleFunc("GET /api/auth/config", s.authConfig)
@@ -161,6 +213,24 @@ func (s *Server) publicFiles(fsys http.FileSystem) http.Handler {
 		}
 		files.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) adminPageNotFound(w http.ResponseWriter, r *http.Request) {
+	http.NotFound(w, r)
+}
+
+func (s *Server) hiddenAdminPage(w http.ResponseWriter, r *http.Request) {
+	content, err := assets.ReadFile("public/admin.html")
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(content)
 }
 
 func jsonOut(w http.ResponseWriter, status int, v any) {
@@ -395,31 +465,7 @@ func (s *Server) serveCatalog(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	blockedCountries := s.blockedCountries()
-	blockedServices := s.blockedServices()
-	if len(blockedCountries) > 0 {
-		filteredCountries := make([]hero.Country, 0, len(snapshot.Countries))
-		for _, item := range snapshot.Countries {
-			if !blockedCountries[strconv.Itoa(item.ID)] {
-				filteredCountries = append(filteredCountries, item)
-			}
-		}
-		snapshot.Countries = filteredCountries
-	}
-	if len(blockedServices) > 0 {
-		filteredServices := make([]hero.Service, 0, len(snapshot.Services))
-		for _, item := range snapshot.Services {
-			if !blockedServices[strings.ToLower(strings.TrimSpace(item.Code))] {
-				filteredServices = append(filteredServices, item)
-			}
-		}
-		snapshot.Services = filteredServices
-	}
-	for service, quote := range snapshot.Quotes {
-		if blockedCountries[strings.TrimSpace(quote.Country)] || blockedServices[strings.ToLower(strings.TrimSpace(service))] || blockedServices[strings.ToLower(strings.TrimSpace(quote.Service))] {
-			delete(snapshot.Quotes, service)
-		}
-	}
+	snapshot = s.filterCatalogSnapshot(r.Context(), snapshot)
 	type priced struct {
 		Service  string `json:"service"`
 		Country  string `json:"country"`
@@ -454,8 +500,8 @@ func (s *Server) purchase(w http.ResponseWriter, r *http.Request, u store.User) 
 		return
 	}
 	var in struct {
-		Country, Service string
-		PayType          int `json:"payType"`
+		Country, Service, RouteMode string
+		PayType                     int `json:"payType"`
 	}
 	if decode(r, &in) != nil || in.Service == "" {
 		fail(w, 400, "请选择服务")
@@ -474,14 +520,22 @@ func (s *Server) purchase(w http.ResponseWriter, r *http.Request, u store.User) 
 		fail(w, 502, e)
 		return
 	}
-	blockedCountries := s.blockedCountries()
-	blockedServices := s.blockedServices()
-	for service, quote := range snapshot.Quotes {
-		if blockedCountries[strings.TrimSpace(quote.Country)] || blockedServices[strings.ToLower(strings.TrimSpace(service))] || blockedServices[strings.ToLower(strings.TrimSpace(quote.Service))] {
-			delete(snapshot.Quotes, service)
+	snapshot = s.filterCatalogSnapshot(r.Context(), snapshot)
+	quote, ok := snapshot.Quotes[in.Service]
+	routeMode := strings.ToLower(strings.TrimSpace(in.RouteMode))
+	if routeMode == "stable" {
+		if stable, stableOK := mostExpensiveQuoteForService(snapshot.Offers, in.Service, s.effectivePricing()); stableOK {
+			quote, ok = stable, true
 		}
 	}
-	quote, ok := snapshot.Quotes[in.Service]
+	if strings.EqualFold(strings.TrimSpace(in.RouteMode), "fast") {
+		if fast, fastOK := fastestQuoteForService(snapshot.Offers, in.Service, s.effectivePricing()); fastOK {
+			quote, ok = fast, true
+		}
+	}
+	if quote.Provider != "" && !s.providerSellable(r.Context(), quote.Provider) {
+		ok = false
+	}
 	if !ok || quote.Count <= 0 {
 		fail(w, 409, "该服务暂时无库存")
 		return

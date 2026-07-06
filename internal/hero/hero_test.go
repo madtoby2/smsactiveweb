@@ -15,7 +15,7 @@ func TestSMSActivateCompatibilityResponses(t *testing.T) {
 		case "getServicesList":
 			w.Write([]byte(`{"status":"success","services":[{"code":"tg","name":"Telegram"}]}`))
 		case "getPrices":
-			w.Write([]byte(`{"6":{"tg":{"cost":0.2,"count":3}}}`))
+			w.Write([]byte(`{"6":{"tg":{"cost":0.2,"count":3,"physicalCount":2}}}`))
 		case "getNumberV2":
 			w.Write([]byte(`{"activationId":"123","phoneNumber":"628001","activationCost":0.2}`))
 		default:
@@ -34,7 +34,7 @@ func TestSMSActivateCompatibilityResponses(t *testing.T) {
 		t.Fatalf("services=%v err=%v", services, err)
 	}
 	offers, err := c.Offers(ctx, "6")
-	if err != nil || len(offers) != 1 || offers[0].Cost != .2 || offers[0].Count != 3 {
+	if err != nil || len(offers) != 1 || offers[0].Cost != .2 || offers[0].Count != 2 || offers[0].PhysicalCount != 2 {
 		t.Fatalf("offers=%v err=%v", offers, err)
 	}
 	a, err := c.Acquire(ctx, "6", "tg", .2)
@@ -60,6 +60,34 @@ func TestGlobalOffersKeepCountryAndReturnEveryCountry(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("global offers lost country routing: %+v", offers)
+	}
+}
+
+func TestOffersPreferPhysicalCountWhenProvided(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"3":{"qq":{"cost":0.2,"count":1920,"physicalCount":17}}}`))
+	}))
+	defer server.Close()
+	offers, err := New("key", server.URL, "840").Offers(context.Background(), "3")
+	if err != nil || len(offers) != 1 {
+		t.Fatalf("offers=%v err=%v", offers, err)
+	}
+	if offers[0].Count != 17 || offers[0].PhysicalCount != 17 {
+		t.Fatalf("offer=%+v, want count and physicalCount to prefer 17", offers[0])
+	}
+}
+
+func TestOffersWithoutPhysicalCountExposeZeroInventory(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"3":{"qq":{"cost":0.2,"count":1920}}}`))
+	}))
+	defer server.Close()
+	offers, err := New("key", server.URL, "840").Offers(context.Background(), "3")
+	if err != nil || len(offers) != 1 {
+		t.Fatalf("offers=%v err=%v", offers, err)
+	}
+	if offers[0].Count != 0 || offers[0].PhysicalCount != 0 {
+		t.Fatalf("offer=%+v, want zero inventory when physicalCount is absent", offers[0])
 	}
 }
 
@@ -98,6 +126,23 @@ func TestBalanceParsesAccessResponse(t *testing.T) {
 	defer server.Close()
 	balance, err := New("key", server.URL, "840").Balance(context.Background())
 	if err != nil || balance != 12.34 {
+		t.Fatalf("balance=%v err=%v", balance, err)
+	}
+}
+
+func TestCallSendsBrowserLikeHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("User-Agent"); got != defaultUserAgent {
+			t.Fatalf("user-agent=%q want=%q", got, defaultUserAgent)
+		}
+		if got := r.Header.Get("Accept"); got == "" {
+			t.Fatal("accept header should not be empty")
+		}
+		_, _ = w.Write([]byte("ACCESS_BALANCE:1.23"))
+	}))
+	defer server.Close()
+	balance, err := New("key", server.URL, "840").Balance(context.Background())
+	if err != nil || balance != 1.23 {
 		t.Fatalf("balance=%v err=%v", balance, err)
 	}
 }

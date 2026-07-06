@@ -67,6 +67,18 @@
   padding: 7px 10px;
   border-radius: 9px;
 }
+.secondary {
+  border: 1px solid #d6e1ff;
+  border-radius: 10px;
+  background: #f7faff;
+  color: var(--blue);
+  font-weight: 700;
+  cursor: pointer;
+}
+.secondary:hover {
+  border-color: #b5c9ff;
+  background: #eef4ff;
+}
 .service-option {
   width: 100%;
   display: flex;
@@ -152,6 +164,46 @@
 .fallback { background: linear-gradient(135deg, #718096, #9aabd0); }
 .service-loading { padding: 28px 10px; text-align: center; color: var(--muted); }
 .payment-row label { margin-top: 4px; }
+.price-subtext {
+  margin-top: 4px;
+  color: var(--muted);
+}
+.route-options {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+.route-option {
+  width: 100%;
+  border: 1px solid #dbe5f6;
+  border-radius: 12px;
+  background: #f8fbff;
+  padding: 10px 12px;
+  text-align: left;
+  color: var(--ink);
+  cursor: pointer;
+}
+.route-option:hover {
+  border-color: #b8ccff;
+  background: #f1f6ff;
+}
+.route-option.selected {
+  border-color: #7ea5ff;
+  background: #eaf1ff;
+  box-shadow: inset 0 0 0 1px #ccdaff;
+}
+.route-option strong,
+.route-option small {
+  display: block;
+  line-height: 1.35;
+}
+.route-option strong {
+  font-size: 13px;
+}
+.route-option small {
+  color: var(--muted);
+  font-size: 11px;
+}
 .order-service { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .order-service > span:last-child { min-width: 0; }
 .order-service b { overflow: hidden; text-overflow: ellipsis; }

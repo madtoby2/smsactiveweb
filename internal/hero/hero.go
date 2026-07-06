@@ -14,6 +14,8 @@ import (
 	"time"
 )
 
+const defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
 type Client struct {
 	Key, BaseURL, Currency string
 	HTTP                   *http.Client
@@ -28,10 +30,11 @@ type Service struct {
 	Name string `json:"name"`
 }
 type Offer struct {
-	Service string  `json:"service"`
-	Country string  `json:"country"`
-	Cost    float64 `json:"cost"`
-	Count   int     `json:"count"`
+	Service       string  `json:"service"`
+	Country       string  `json:"country"`
+	Cost          float64 `json:"cost"`
+	Count         int     `json:"count"`
+	PhysicalCount int     `json:"physicalCount,omitempty"`
 }
 type Activation struct {
 	ID, Phone string
@@ -68,6 +71,8 @@ func (c *Client) call(ctx context.Context, action string, params map[string]stri
 	}
 	u.RawQuery = q.Encode()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	req.Header.Set("User-Agent", defaultUserAgent)
+	req.Header.Set("Accept", "application/json, text/plain, */*")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, err
@@ -194,9 +199,16 @@ func appendOffer(out *[]Offer, country, service string, value any) {
 		if cost == 0 {
 			cost, _ = number(m["price"])
 		}
-		count, _ := number(m["count"])
+		physicalCount, _ := number(m["physicalCount"])
+		resolvedPhysicalCount := int(physicalCount)
 		if cost > 0 {
-			*out = append(*out, Offer{Service: service, Country: country, Cost: cost, Count: int(count)})
+			*out = append(*out, Offer{
+				Service:       service,
+				Country:       country,
+				Cost:          cost,
+				Count:         resolvedPhysicalCount,
+				PhysicalCount: resolvedPhysicalCount,
+			})
 		}
 	}
 }

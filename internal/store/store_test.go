@@ -217,3 +217,65 @@ func TestDeleteExpiredUnpaidSMSOnlyRemovesPendingPairs(t *testing.T) {
 		t.Fatalf("paid order=%+v err=%v", paid, getErr)
 	}
 }
+
+func TestProductOrderReservesCredentialOnFulfillment(t *testing.T) {
+	s := testStore(t)
+	u, _, err := s.Register("product@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	product := Product{Code: "tg-premium", Name: "Telegram 成品号", Category: "telegram_account", Description: "带凭证", PriceFen: 2999, Active: true}
+	if err = s.UpsertProduct(product); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.AddProductInventory(product.Code, "account:demo1 | password:secret1"); err != nil {
+		t.Fatal(err)
+	}
+	created := time.Now().UTC().Format(time.RFC3339)
+	order := ProductOrder{ID: "T1", UserID: u.ID, ProductCode: product.Code, ProductName: product.Name, PriceFen: product.PriceFen, CreatedAt: created}
+	payment := Recharge{ID: "PT1", UserID: u.ID, AmountFen: product.PriceFen, Provider: "epay", PayType: "2", Token: "PT1", Reference: order.ID, CreatedAt: created}
+	if err = s.CreateProductPayment(u, order, payment); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.CompleteProductPayment(payment.ID, "trade-t1"); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := s.ClaimPaidProductOrder(order.ID)
+	if err != nil || !claimed {
+		t.Fatalf("claimed=%v err=%v", claimed, err)
+	}
+	item, err := s.ReserveProductCredential(order.ID, product.Code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetProductOrder(order.ID, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "delivered" || got.Credential == "" {
+		t.Fatalf("order=%+v", got)
+	}
+	if item.OrderID != order.ID || item.Status != "sold" {
+		t.Fatalf("item=%+v", item)
+	}
+}
+
+func TestListProductsShowsAvailableInventoryCount(t *testing.T) {
+	s := testStore(t)
+	product := Product{Code: "tg-basic", Name: "Telegram 基础号", Category: "telegram_account", PriceFen: 1999, Active: true}
+	if err := s.UpsertProduct(product); err != nil {
+		t.Fatal(err)
+	}
+	for _, credential := range []string{"a", "b"} {
+		if err := s.AddProductInventory(product.Code, credential); err != nil {
+			t.Fatal(err)
+		}
+	}
+	products, err := s.ListProducts(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(products) != 1 || products[0].AvailableCount != 2 {
+		t.Fatalf("products=%+v", products)
+	}
+}

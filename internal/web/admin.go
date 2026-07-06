@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"sms-platform/internal/hero"
 	"sms-platform/internal/mailer"
 	"sms-platform/internal/store"
 )
@@ -27,6 +29,7 @@ var settingKeys = map[string]bool{
 	"smsmanCnyRate":             true,
 	"blockedCountries":          true,
 	"blockedServices":           true,
+	"blockedProviders":          true,
 	"refundWindowMinutes":       true,
 	"refundMaxCount":            true,
 	"mailProvider":              true,
@@ -308,6 +311,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	out["smsmanCnyRate"] = strconv.FormatFloat(pricing.SMSManCNY, 'f', -1, 64)
 	out["blockedCountries"] = values["blockedCountries"]
 	out["blockedServices"] = values["blockedServices"]
+	out["blockedProviders"] = values["blockedProviders"]
 	refund := s.effectiveRefundPolicy()
 	out["refundWindowMinutes"] = strconv.Itoa(refund.WindowMinutes)
 	out["refundMaxCount"] = strconv.Itoa(refund.MaxCount)
@@ -399,6 +403,19 @@ func (s *Server) updateAdminSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			value = strings.ToLower(value)
 		}
+		if key == "blockedProviders" {
+			for _, item := range strings.Split(value, ",") {
+				item = strings.ToLower(strings.TrimSpace(item))
+				if item == "" {
+					continue
+				}
+				if item != "hero" && item != "smsman" {
+					fail(w, 400, "blockedProviders must be a comma-separated list of hero,smsman")
+					return
+				}
+			}
+			value = strings.ToLower(value)
+		}
 		if key == "smtpPort" {
 			port, err := strconv.Atoi(value)
 			if err != nil || port < 1 || port > 65535 {
@@ -455,6 +472,8 @@ func (s *Server) updateAdminSettings(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, err)
 		return
 	}
+	s.Catalog.Clear()
+	s.ProviderStatus.Clear()
 	s.Store.Audit("settings.update", "settings", strings.Join(sortedKeys(clean), ","))
 	s.adminSettings(w, r)
 }
@@ -512,6 +531,133 @@ func (s *Server) blockedServices() map[string]bool {
 
 func (s *Server) serviceBlocked(service string) bool {
 	return s.blockedServices()[strings.ToLower(strings.TrimSpace(service))]
+}
+
+func parseBlockedProviders(value string) map[string]bool {
+	blocked := map[string]bool{}
+	for _, item := range strings.Split(value, ",") {
+		item = strings.ToLower(strings.TrimSpace(item))
+		if item != "" {
+			blocked[item] = true
+		}
+	}
+	return blocked
+}
+
+func (s *Server) blockedProviders() map[string]bool {
+	values, err := s.Store.Settings()
+	if err != nil {
+		return map[string]bool{}
+	}
+	return parseBlockedProviders(values["blockedProviders"])
+}
+
+func normalizeProvider(provider string) string {
+	return strings.ToLower(strings.TrimSpace(provider))
+}
+
+func (s *Server) providerBlocked(provider string) bool {
+	return s.blockedProviders()[normalizeProvider(provider)]
+}
+
+func (s *Server) providerSellable(ctx context.Context, provider string) bool {
+	provider = normalizeProvider(provider)
+	if provider == "" {
+		return true
+	}
+	if s.providerBlocked(provider) {
+		return false
+	}
+	if entry, ok := s.ProviderStatus.Get(provider); ok {
+		return entry.available
+	}
+	available := true
+	switch provider {
+	case "hero":
+		if s.C.HeroKey == "" {
+			available = false
+			break
+		}
+		balance, err := s.Hero.Balance(ctx)
+		if err == nil {
+			available = balance > 0
+		}
+	case "smsman":
+		if s.C.SMSManToken == "" {
+			available = false
+			break
+		}
+		balance, err := s.SMSMan.Balance(ctx)
+		if err == nil {
+			available = balance > 0
+		}
+	}
+	s.ProviderStatus.Set(provider, available)
+	return available
+}
+
+func (s *Server) filterCatalogSnapshot(ctx context.Context, snapshot catalogSnapshot) catalogSnapshot {
+	blockedCountries := s.blockedCountries()
+	blockedServices := s.blockedServices()
+	providerAllowed := map[string]bool{}
+	allowProvider := func(provider string) bool {
+		provider = normalizeProvider(provider)
+		if provider == "" {
+			return true
+		}
+		if allowed, ok := providerAllowed[provider]; ok {
+			return allowed
+		}
+		allowed := s.providerSellable(ctx, provider)
+		providerAllowed[provider] = allowed
+		return allowed
+	}
+	filteredQuotes := map[string]providerQuote{}
+	filteredOffers := make([]providerQuote, 0, len(snapshot.Offers))
+	allowedServices := map[string]bool{}
+	allowedCountries := map[string]bool{}
+	for service, quote := range snapshot.Quotes {
+		serviceCode := strings.ToLower(strings.TrimSpace(service))
+		quoteService := strings.ToLower(strings.TrimSpace(quote.Service))
+		countryCode := strings.TrimSpace(quote.Country)
+		if blockedCountries[countryCode] || blockedServices[serviceCode] || blockedServices[quoteService] || !allowProvider(quote.Provider) {
+			continue
+		}
+		filteredQuotes[service] = quote
+		allowedServices[quote.Service] = true
+		allowedCountries[quote.Country] = true
+	}
+	sourceOffers := snapshot.Offers
+	if len(sourceOffers) == 0 {
+		sourceOffers = quoteListFromMap(snapshot.Quotes)
+	}
+	for _, quote := range sourceOffers {
+		serviceCode := strings.ToLower(strings.TrimSpace(quote.Service))
+		countryCode := strings.TrimSpace(quote.Country)
+		if blockedCountries[countryCode] || blockedServices[serviceCode] || !allowProvider(quote.Provider) {
+			continue
+		}
+		filteredOffers = append(filteredOffers, quote)
+		allowedServices[quote.Service] = true
+		allowedCountries[quote.Country] = true
+	}
+	filteredCountries := make([]hero.Country, 0, len(snapshot.Countries))
+	for _, country := range snapshot.Countries {
+		if allowedCountries[strconv.Itoa(country.ID)] {
+			filteredCountries = append(filteredCountries, country)
+		}
+	}
+	filteredServices := make([]hero.Service, 0, len(snapshot.Services))
+	for _, service := range snapshot.Services {
+		if allowedServices[service.Code] {
+			filteredServices = append(filteredServices, service)
+		}
+	}
+	snapshot.Countries = filteredCountries
+	snapshot.Services = filteredServices
+	snapshot.Quotes = filteredQuotes
+	snapshot.Offers = filteredOffers
+	return snapshot
 }
 
 func messageBody(r *http.Request) (string, error) {

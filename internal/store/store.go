@@ -52,6 +52,38 @@ type SMSOrder struct {
 	LastNumberAt     string
 	CreatedAt        string
 }
+type Product struct {
+	Code           string `json:"code"`
+	Name           string `json:"name"`
+	Category       string `json:"category"`
+	Description    string `json:"description"`
+	PriceFen       int64  `json:"priceFen"`
+	Active         bool   `json:"active"`
+	AvailableCount int64  `json:"availableCount"`
+	CreatedAt      string `json:"createdAt"`
+	UpdatedAt      string `json:"updatedAt"`
+}
+type ProductInventoryItem struct {
+	ID          int64  `json:"id"`
+	ProductCode string `json:"productCode"`
+	Credential  string `json:"credential"`
+	Status      string `json:"status"`
+	OrderID     string `json:"orderId"`
+	CreatedAt   string `json:"createdAt"`
+	UpdatedAt   string `json:"updatedAt"`
+}
+type ProductOrder struct {
+	ID          string `json:"id"`
+	UserID      int64  `json:"-"`
+	ProductCode string `json:"productCode"`
+	ProductName string `json:"productName"`
+	Credential  string `json:"credential"`
+	Status      string `json:"status"`
+	PriceFen    int64  `json:"priceFen"`
+	Refunded    bool   `json:"refunded"`
+	CreatedAt   string `json:"createdAt"`
+	DeliveredAt string `json:"deliveredAt"`
+}
 type Recharge struct {
 	ID                                                      string `json:"id"`
 	UserID, AmountFen                                       int64
@@ -177,6 +209,10 @@ CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,email TEXT NOT NULL UNIQ
 CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL,expires_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS sms_orders(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,upstream_id TEXT,upstream_provider TEXT NOT NULL DEFAULT 'hero',upstream_country TEXT NOT NULL DEFAULT '',upstream_service TEXT NOT NULL DEFAULT '',country TEXT NOT NULL,country_name TEXT NOT NULL DEFAULT '',service TEXT NOT NULL,phone TEXT,status TEXT NOT NULL,code TEXT,upstream_cost REAL NOT NULL,price_fen INTEGER NOT NULL,refunded INTEGER NOT NULL DEFAULT 0,auto_replace INTEGER NOT NULL DEFAULT 0,replace_attempts INTEGER NOT NULL DEFAULT 0,last_number_at TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id),UNIQUE(upstream_provider,upstream_id));
 CREATE TABLE IF NOT EXISTS sms_attempts(id INTEGER PRIMARY KEY,order_id TEXT NOT NULL,upstream_id TEXT NOT NULL,upstream_provider TEXT NOT NULL DEFAULT 'hero',phone TEXT NOT NULL,status TEXT NOT NULL,upstream_cost REAL NOT NULL,started_at TEXT NOT NULL,ended_at TEXT,FOREIGN KEY(order_id) REFERENCES sms_orders(id),UNIQUE(upstream_provider,upstream_id));
+CREATE TABLE IF NOT EXISTS product_catalog(code TEXT PRIMARY KEY,name TEXT NOT NULL,category TEXT NOT NULL DEFAULT 'telegram_account',description TEXT NOT NULL DEFAULT '',price_fen INTEGER NOT NULL,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS product_inventory(id INTEGER PRIMARY KEY,product_code TEXT NOT NULL,credential TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'available',order_id TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,FOREIGN KEY(product_code) REFERENCES product_catalog(code));
+CREATE INDEX IF NOT EXISTS product_inventory_product_status ON product_inventory(product_code,status);
+CREATE TABLE IF NOT EXISTS product_orders(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,product_code TEXT NOT NULL,product_name TEXT NOT NULL,credential TEXT NOT NULL DEFAULT '',status TEXT NOT NULL,price_fen INTEGER NOT NULL,refunded INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,delivered_at TEXT NOT NULL DEFAULT '',FOREIGN KEY(user_id) REFERENCES users(id),FOREIGN KEY(product_code) REFERENCES product_catalog(code));
 CREATE TABLE IF NOT EXISTS recharges(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,amount_fen INTEGER NOT NULL,provider TEXT NOT NULL,pay_type TEXT NOT NULL,status TEXT NOT NULL,provider_id TEXT,refund_provider_id TEXT NOT NULL DEFAULT '',refunded_at TEXT NOT NULL DEFAULT '',token TEXT NOT NULL,reference TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS ledger(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,amount_fen INTEGER NOT NULL,kind TEXT NOT NULL,reference TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id));`)
 	if err != nil {

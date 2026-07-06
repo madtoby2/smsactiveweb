@@ -14,6 +14,7 @@ type Config struct {
 	Port, BaseURL, HeroKey, HeroURL, HeroCurrency      string
 	SMSManToken, SMSManURL                             string
 	AdminEmail, AdminPassword                          string
+	AdminUIPath                                        string
 	SMTPHost, SMTPUser, SMTPPassword, SMTPFrom         string
 	ResendAPIKey, ResendFrom                           string
 	TurnstileSiteKey, TurnstileSecret                  string
@@ -95,11 +96,12 @@ func Load() Config {
 		HeroKey: os.Getenv("HEROSMS_API_KEY"), HeroURL: env("HEROSMS_BASE_URL", "https://hero-sms.com/stubs/handler_api.php"), HeroCurrency: env("HEROSMS_CURRENCY", "840"),
 		SMSManToken: os.Getenv("SMSMAN_API_TOKEN"), SMSManURL: env("SMSMAN_BASE_URL", "https://api.sms-man.com/control"),
 		AdminEmail: strings.ToLower(strings.TrimSpace(env("ADMIN_EMAIL", "admin@local"))), AdminPassword: os.Getenv("ADMIN_PASSWORD"),
-		SMTPHost: os.Getenv("SMTP_HOST"), SMTPPort: envInt("SMTP_PORT", 587), SMTPUser: os.Getenv("SMTP_USER"), SMTPPassword: os.Getenv("SMTP_PASSWORD"), SMTPFrom: os.Getenv("SMTP_FROM"),
+		AdminUIPath: normalizeAdminUIPath(env("ADMIN_UI_PATH", "/console-ym-7f4a9d.html")),
+		SMTPHost:    os.Getenv("SMTP_HOST"), SMTPPort: envInt("SMTP_PORT", 587), SMTPUser: os.Getenv("SMTP_USER"), SMTPPassword: os.Getenv("SMTP_PASSWORD"), SMTPFrom: os.Getenv("SMTP_FROM"),
 		ResendAPIKey: os.Getenv("RESEND_API_KEY"), ResendFrom: os.Getenv("RESEND_FROM"),
 		TurnstileSiteKey: os.Getenv("TURNSTILE_SITE_KEY"), TurnstileSecret: os.Getenv("TURNSTILE_SECRET"), EmailVerificationRequired: env("EMAIL_VERIFICATION_REQUIRED", "false") == "true",
 		TelegramBotToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
-		USDCNY: envFloat("USD_CNY_RATE", 7.2), SMSManCNYRate: envFloat("SMSMAN_PRICE_CNY_RATE", 0.08), Markup: envFloat("PRICE_MARKUP_CNY", 1),
+		USDCNY:           envFloat("USD_CNY_RATE", 7.2), SMSManCNYRate: envFloat("SMSMAN_PRICE_CNY_RATE", 0.08), Markup: envFloat("PRICE_MARKUP_CNY", 1),
 		PayProvider: env("PAY_PROVIDER", "sandbox"), YSMAppID: os.Getenv("YSM_APP_ID"), YSMSecret: os.Getenv("YSM_SECRET"), YSMURL: env("YSM_BASE_URL", "https://www.yishoumi.cn"),
 		EPayPID: os.Getenv("EPAY_PID"), EPayKey: os.Getenv("EPAY_KEY"), EPayURL: env("EPAY_BASE_URL", "https://50pay.xiajuan88.com"),
 		EPayPlatformPublicKey: os.Getenv("EPAY_PLATFORM_PUBLIC_KEY"), EPayMerchantPrivateKey: os.Getenv("EPAY_MERCHANT_PRIVATE_KEY"),
@@ -109,6 +111,17 @@ func Load() Config {
 		AutoReplaceScan:       time.Duration(envInt("SMS_AUTO_REPLACE_SCAN_SECONDS", 10)) * time.Second,
 		PaymentOrderTTL:       time.Duration(envInt("PAYMENT_ORDER_TTL_MINUTES", 20)) * time.Minute,
 	}
+}
+
+func normalizeAdminUIPath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "/console-ym-7f4a9d.html"
+	}
+	if !strings.HasPrefix(value, "/") {
+		value = "/" + value
+	}
+	return value
 }
 
 func loadEnv(path string) {

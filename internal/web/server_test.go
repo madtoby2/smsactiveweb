@@ -1,13 +1,13 @@
 package web
 
 import (
-	"encoding/base64"
 	"context"
-	crand "crypto/rand"
 	"crypto"
+	crand "crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -200,7 +200,7 @@ func TestPublicCatalogReturnsFullCountryServiceMatrix(t *testing.T) {
 		case "getServicesList":
 			_, _ = w.Write([]byte(`{"services":[{"code":"tg","name":"Telegram"}]}`))
 		case "getPrices":
-			_, _ = w.Write([]byte(`{"7":{"tg":{"cost":0.2,"count":4}},"9":{"tg":{"cost":0.3,"count":6}}}`))
+			_, _ = w.Write([]byte(`{"7":{"tg":{"cost":0.2,"count":4,"physicalCount":4}},"9":{"tg":{"cost":0.3,"count":6,"physicalCount":6}}}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -799,7 +799,7 @@ func TestPayForSMSOrderThenAcquireEndToEnd(t *testing.T) {
 		case "getServicesList":
 			_, _ = w.Write([]byte(`{"services":[{"code":"tg","name":"Telegram"}]}`))
 		case "getPrices":
-			w.Write([]byte(`{"6":{"tg":{"cost":0.5,"count":3}}}`))
+			w.Write([]byte(`{"6":{"tg":{"cost":0.5,"count":3,"physicalCount":3}}}`))
 		case "getNumberV2":
 			_ = json.NewEncoder(w).Encode(map[string]any{"activationId": "flow-activation", "phoneNumber": "628001", "activationCost": .5})
 		default:
@@ -883,7 +883,7 @@ func TestAggregatedQuoteSelectsSMSManAndRoutesPaidOrder(t *testing.T) {
 		case "getServicesList":
 			_, _ = w.Write([]byte(`{"services":[{"code":"tg","name":"Telegram"}]}`))
 		case "getPrices":
-			_, _ = w.Write([]byte(`{"2":{"tg":{"cost":1,"count":5}}}`))
+			_, _ = w.Write([]byte(`{"2":{"tg":{"cost":1,"count":5,"physicalCount":5}}}`))
 		case "getNumberV2":
 			if r.URL.Query().Get("country") != "2" || r.URL.Query().Get("service") != "tg" {
 				t.Fatalf("wrong Hero route country=%q service=%q", r.URL.Query().Get("country"), r.URL.Query().Get("service"))
@@ -998,7 +998,7 @@ func TestGlobalRecommendedQuotePurchasesItsCountryWithoutCountrySelection(t *tes
 			if r.URL.Query().Get("country") != "" {
 				t.Fatalf("expected global prices request")
 			}
-			_, _ = w.Write([]byte(`{"6":{"tg":{"cost":0.5,"count":2}},"7":{"tg":{"cost":0.2,"count":4}}}`))
+			_, _ = w.Write([]byte(`{"6":{"tg":{"cost":0.5,"count":2,"physicalCount":2}},"7":{"tg":{"cost":0.2,"count":4,"physicalCount":4}}}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -1049,13 +1049,13 @@ func TestPurchaseUsesExplicitSelectedCountryQuote(t *testing.T) {
 		case "getPrices":
 			country := r.URL.Query().Get("country")
 			if country == "" {
-				_, _ = w.Write([]byte(`{"7":{"tg":{"cost":0.2,"count":4}},"9":{"tg":{"cost":0.3,"count":6}}}`))
+				_, _ = w.Write([]byte(`{"7":{"tg":{"cost":0.2,"count":4,"physicalCount":4}},"9":{"tg":{"cost":0.3,"count":6,"physicalCount":6}}}`))
 				return
 			}
 			if country != "9" {
 				t.Fatalf("unexpected selected country for prices=%q", country)
 			}
-			_, _ = w.Write([]byte(`{"9":{"tg":{"cost":0.3,"count":6}}}`))
+			_, _ = w.Write([]byte(`{"9":{"tg":{"cost":0.3,"count":6,"physicalCount":6}}}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -1649,8 +1649,9 @@ func TestHTMLPagesDisableCaching(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	h := New(config.Config{}, db).Routes()
-	for _, path := range []string{"/", "/admin.html", "/api.html", "/contact.html", "/cookie.html", "/privacy.html", "/terms.html"} {
+	cfg := config.Config{AdminUIPath: "/console-test-hidden.html"}
+	h := New(cfg, db).Routes()
+	for _, path := range []string{"/", cfg.AdminUIPath, "/api.html", "/contact.html", "/cookie.html", "/privacy.html", "/terms.html"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		result := httptest.NewRecorder()
 		h.ServeHTTP(result, req)
@@ -1666,6 +1667,36 @@ func TestHTMLPagesDisableCaching(t *testing.T) {
 		if got := result.Header().Get("Expires"); got != "0" {
 			t.Fatalf("GET %s Expires=%q", path, got)
 		}
+	}
+}
+
+func TestLegacyAdminPathReturnsNotFoundAndHiddenAdminPathServesPage(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "hidden-admin.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := config.Config{AdminUIPath: "/console-test-hidden.html"}
+	h := New(cfg, db).Routes()
+
+	legacyReq := httptest.NewRequest(http.MethodGet, "/admin.html", nil)
+	legacyRes := httptest.NewRecorder()
+	h.ServeHTTP(legacyRes, legacyReq)
+	if legacyRes.Code != http.StatusNotFound {
+		t.Fatalf("GET /admin.html status=%d", legacyRes.Code)
+	}
+
+	hiddenReq := httptest.NewRequest(http.MethodGet, cfg.AdminUIPath, nil)
+	hiddenRes := httptest.NewRecorder()
+	h.ServeHTTP(hiddenRes, hiddenReq)
+	if hiddenRes.Code != http.StatusOK {
+		t.Fatalf("GET %s status=%d", cfg.AdminUIPath, hiddenRes.Code)
+	}
+	if got := hiddenRes.Header().Get("X-Robots-Tag"); got != "noindex, nofollow, noarchive, nosnippet" {
+		t.Fatalf("GET %s X-Robots-Tag=%q", cfg.AdminUIPath, got)
+	}
+	if !strings.Contains(hiddenRes.Body.String(), "ADMIN CONSOLE") {
+		t.Fatalf("GET %s missing admin shell", cfg.AdminUIPath)
 	}
 }
 
@@ -1959,7 +1990,7 @@ func TestPublicCatalogPrefersHigherStockBeforeLowerPrice(t *testing.T) {
 		case "getServicesList":
 			_, _ = w.Write([]byte(`{"services":[{"code":"fb","name":"Facebook"}]}`))
 		case "getPrices":
-			_, _ = w.Write([]byte(`{"7":{"fb":{"cost":0.02,"count":12}},"9":{"fb":{"cost":0.01,"count":3}}}`))
+			_, _ = w.Write([]byte(`{"7":{"fb":{"cost":0.02,"count":12,"physicalCount":12}},"9":{"fb":{"cost":0.01,"count":3,"physicalCount":3}}}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -1998,6 +2029,331 @@ func TestPublicCatalogPrefersHigherStockBeforeLowerPrice(t *testing.T) {
 	}
 	if bestCountry != "7" || bestCount != 12 {
 		t.Fatalf("offers=%+v, want Malaysia to be the highest-stock route", payload.Offers)
+	}
+}
+
+func TestPurchaseAllowsFastRouteModeOverride(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "fast-override.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "getCountries":
+			_, _ = w.Write([]byte(`{"7":{"id":7,"eng":"Malaysia","chn":"马来西亚"},"9":{"id":9,"eng":"Thailand","chn":"泰国"}}`))
+		case "getServicesList":
+			_, _ = w.Write([]byte(`{"services":[{"code":"fb","name":"Facebook"}]}`))
+		case "getPrices":
+			_, _ = w.Write([]byte(`{"7":{"fb":{"cost":0.02,"count":12,"physicalCount":12}},"9":{"fb":{"cost":0.01,"count":3,"physicalCount":3}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+	server := New(config.Config{HeroKey: "hero", HeroURL: upstream.URL, HeroCurrency: "840", USDCNY: 7.2, Markup: 1, PayProvider: "sandbox", AllowLiveSMSInSandbox: true}, db)
+	handler := server.Routes()
+	_, session, err := db.Register("fast@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/orders", strings.NewReader(`{"Country":"","Service":"fb","payType":2,"routeMode":"fast"}`))
+	request.Header.Set("content-type", "application/json")
+	request.AddCookie(&http.Cookie{Name: "session", Value: session})
+	result := httptest.NewRecorder()
+	handler.ServeHTTP(result, request)
+	if result.Code != http.StatusCreated {
+		t.Fatalf("purchase status=%d body=%s", result.Code, result.Body.String())
+	}
+	var checkout struct {
+		ID       string `json:"id"`
+		PriceFen int64  `json:"priceFen"`
+	}
+	if err = json.NewDecoder(result.Body).Decode(&checkout); err != nil {
+		t.Fatal(err)
+	}
+	order, err := db.GetSMSByID(checkout.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if order.Country != "7" || order.UpstreamCountry != "7" {
+		t.Fatalf("order=%+v, want fast route country 7", order)
+	}
+	if checkout.PriceFen != 115 {
+		t.Fatalf("price=%d, want fast route price 115 with stock-priority route", checkout.PriceFen)
+	}
+}
+
+func TestCountryCatalogKeepsMultipleProviderOffersForRouteChoice(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "country-offers.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	heroUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "getCountries":
+			_, _ = w.Write([]byte(`{"7":{"id":7,"eng":"Malaysia","chn":"马来西亚"}}`))
+		case "getServicesList":
+			_, _ = w.Write([]byte(`{"services":[{"code":"fb","name":"Facebook"}]}`))
+		case "getPrices":
+			_, _ = w.Write([]byte(`{"7":{"fb":{"cost":0.35,"count":12,"physicalCount":12}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer heroUpstream.Close()
+	smsUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/countries":
+			_, _ = w.Write([]byte(`{"1":{"id":1,"name":"Malaysia"}}`))
+		case "/applications":
+			_, _ = w.Write([]byte(`{"100":{"id":100,"name":"Facebook"}}`))
+		case "/get-prices":
+			_, _ = w.Write([]byte(`{"100":{"price":0.20,"count":3}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer smsUpstream.Close()
+
+	server := New(config.Config{
+		HeroKey:                 "hero",
+		HeroURL:                 heroUpstream.URL,
+		HeroCurrency:            "840",
+		SMSManToken:             "sms",
+		SMSManURL:               smsUpstream.URL,
+		USDCNY:                  7.2,
+		SMSManCNYRate:           7.2,
+		Markup:                  1,
+		PayProvider:             "sandbox",
+		AllowLiveSMSInSandbox:   true,
+	}, db)
+	handler := server.Routes()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/catalog?country=7", nil)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("catalog status=%d body=%s", res.Code, res.Body.String())
+	}
+	var payload struct {
+		Offers []struct {
+			Service  string `json:"service"`
+			Country  string `json:"country"`
+			Count    int    `json:"count"`
+			PriceFen int64  `json:"priceFen"`
+		} `json:"offers"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	var fbOffers []int64
+	for _, offer := range payload.Offers {
+		if offer.Service == "fb" && offer.Country == "7" {
+			fbOffers = append(fbOffers, offer.PriceFen)
+		}
+	}
+	if len(fbOffers) != 2 {
+		t.Fatalf("offers=%+v, want both hero and smsman routes for country-specific catalog", payload.Offers)
+	}
+}
+
+func TestBlockedProvidersExcludeRoutesFromCatalog(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "blocked-providers.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.UpdateSettings(map[string]string{"blockedProviders": "smsman"}); err != nil {
+		t.Fatal(err)
+	}
+	heroUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "getBalance":
+			_, _ = w.Write([]byte("5"))
+		case "getCountries":
+			_, _ = w.Write([]byte(`{"7":{"id":7,"eng":"Malaysia","chn":"马来西亚"}}`))
+		case "getServicesList":
+			_, _ = w.Write([]byte(`{"services":[{"code":"fb","name":"Facebook"}]}`))
+		case "getPrices":
+			_, _ = w.Write([]byte(`{"7":{"fb":{"cost":0.35,"count":12,"physicalCount":12}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer heroUpstream.Close()
+	smsUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/get-balance":
+			_, _ = w.Write([]byte(`{"balance":10}`))
+		case "/countries":
+			_, _ = w.Write([]byte(`{"1":{"id":1,"name":"Malaysia"}}`))
+		case "/applications":
+			_, _ = w.Write([]byte(`{"100":{"id":100,"name":"Facebook"}}`))
+		case "/get-prices":
+			_, _ = w.Write([]byte(`{"100":{"price":0.20,"count":30}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer smsUpstream.Close()
+	server := New(config.Config{
+		HeroKey:               "hero",
+		HeroURL:               heroUpstream.URL,
+		HeroCurrency:          "840",
+		SMSManToken:           "sms",
+		SMSManURL:             smsUpstream.URL,
+		USDCNY:                7.2,
+		SMSManCNYRate:         7.2,
+		Markup:                1,
+		PayProvider:           "sandbox",
+		AllowLiveSMSInSandbox: true,
+	}, db)
+	req := httptest.NewRequest(http.MethodGet, "/api/catalog?country=7", nil)
+	res := httptest.NewRecorder()
+	server.Routes().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("catalog status=%d body=%s", res.Code, res.Body.String())
+	}
+	var payload struct {
+		Offers []struct {
+			Service  string `json:"service"`
+			Country  string `json:"country"`
+			PriceFen int64  `json:"priceFen"`
+		} `json:"offers"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Offers) != 1 || payload.Offers[0].PriceFen != 352 {
+		t.Fatalf("offers=%+v, want only hero route after blocking smsman", payload.Offers)
+	}
+}
+
+func TestZeroSMSManBalanceExcludesCatalogInventory(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "zero-smsman-balance.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	smsUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/get-balance":
+			_, _ = w.Write([]byte(`{"balance":0}`))
+		case "/countries":
+			_, _ = w.Write([]byte(`{"3":{"id":3,"name":"China"}}`))
+		case "/applications":
+			_, _ = w.Write([]byte(`{"149":{"id":149,"name":"QQ"}}`))
+		case "/get-prices":
+			_, _ = w.Write([]byte(`{"149":{"price":1.50,"count":99}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer smsUpstream.Close()
+	server := New(config.Config{
+		SMSManToken:           "sms",
+		SMSManURL:             smsUpstream.URL,
+		SMSManCNYRate:         0.09,
+		Markup:                1,
+		PayProvider:           "sandbox",
+		AllowLiveSMSInSandbox: true,
+	}, db)
+	req := httptest.NewRequest(http.MethodGet, "/api/catalog?country=3", nil)
+	res := httptest.NewRecorder()
+	server.Routes().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("catalog status=%d body=%s", res.Code, res.Body.String())
+	}
+	var payload struct {
+		Countries []any `json:"countries"`
+		Services  []any `json:"services"`
+		Offers    []any `json:"offers"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Countries) != 0 || len(payload.Services) != 0 || len(payload.Offers) != 0 {
+		t.Fatalf("payload=%+v, want no sellable inventory when smsman balance is zero", payload)
+	}
+}
+
+func TestPurchaseAllowsStableRouteModeOverride(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "stable-override.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	heroUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "getCountries":
+			_, _ = w.Write([]byte(`{"7":{"id":7,"eng":"Malaysia","chn":"马来西亚"}}`))
+		case "getServicesList":
+			_, _ = w.Write([]byte(`{"services":[{"code":"fb","name":"Facebook"}]}`))
+		case "getPrices":
+			_, _ = w.Write([]byte(`{"7":{"fb":{"cost":0.35,"count":12,"physicalCount":12}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer heroUpstream.Close()
+	smsUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/countries":
+			_, _ = w.Write([]byte(`{"1":{"id":1,"name":"Malaysia"}}`))
+		case "/applications":
+			_, _ = w.Write([]byte(`{"100":{"id":100,"name":"Facebook"}}`))
+		case "/get-prices":
+			_, _ = w.Write([]byte(`{"100":{"price":0.20,"count":30}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer smsUpstream.Close()
+	server := New(config.Config{
+		HeroKey:               "hero",
+		HeroURL:               heroUpstream.URL,
+		HeroCurrency:          "840",
+		SMSManToken:           "sms",
+		SMSManURL:             smsUpstream.URL,
+		USDCNY:                7.2,
+		SMSManCNYRate:         7.2,
+		Markup:                1,
+		PayProvider:           "sandbox",
+		AllowLiveSMSInSandbox: true,
+	}, db)
+	handler := server.Routes()
+	_, session, err := db.Register("stable@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/orders", strings.NewReader(`{"Country":"7","Service":"fb","payType":2,"routeMode":"stable"}`))
+	request.Header.Set("content-type", "application/json")
+	request.AddCookie(&http.Cookie{Name: "session", Value: session})
+	result := httptest.NewRecorder()
+	handler.ServeHTTP(result, request)
+	if result.Code != http.StatusCreated {
+		t.Fatalf("purchase status=%d body=%s", result.Code, result.Body.String())
+	}
+	var checkout struct {
+		ID       string `json:"id"`
+		PriceFen int64  `json:"priceFen"`
+	}
+	if err = json.NewDecoder(result.Body).Decode(&checkout); err != nil {
+		t.Fatal(err)
+	}
+	order, err := db.GetSMSByID(checkout.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if order.UpstreamProvider != "hero" || order.UpstreamCountry != "7" {
+		t.Fatalf("order=%+v, want stable route to choose higher-priced hero quote", order)
+	}
+	if checkout.PriceFen != 352 {
+		t.Fatalf("price=%d, want stable route price 352 from higher-priced hero quote", checkout.PriceFen)
 	}
 }
 

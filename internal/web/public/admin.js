@@ -36,7 +36,7 @@ $("#loginForm").onsubmit = async event => {
     await request("/api/admin/login", {method: "POST", body: JSON.stringify({Email: $("#email").value, Password: $("#password").value})});
     localStorage.setItem("adminLoginPending", "1");
     $("#loginError").textContent = "\u767b\u5f55\u6210\u529f\uff0c\u6b63\u5728\u8fdb\u5165\u540e\u53f0...";
-    location.replace(`/admin.html?session=${Date.now()}`);
+    location.replace(`${location.pathname}?session=${Date.now()}`);
   } catch (error) {
     $("#loginError").textContent = error.message;
   }
@@ -380,7 +380,7 @@ function syncMailProviderUI() {
 
 $("#settingsForm").onsubmit = async event => {
   event.preventDefault();
-  const keys = ["markupCNY", "usdCnyRate", "smsmanCnyRate", "blockedCountries", "blockedServices", "refundWindowMinutes", "refundMaxCount", "mailProvider", "smtpHost", "smtpPort", "smtpUser", "smtpFrom", "resendFrom", "contactTitle", "contactValue", "contactURL", "supportHours"];
+  const keys = ["markupCNY", "usdCnyRate", "smsmanCnyRate", "blockedCountries", "blockedServices", "blockedProviders", "refundWindowMinutes", "refundMaxCount", "mailProvider", "smtpHost", "smtpPort", "smtpUser", "smtpFrom", "resendFrom", "contactTitle", "contactValue", "contactURL", "supportHours"];
   const body = {};
   keys.forEach(key => body[key] = $(`#${key}`).value);
   body.emailVerificationRequired = String($("#emailVerificationRequired").checked);
@@ -413,7 +413,7 @@ async function bootstrapAdmin() {
     try {
       await request("/api/admin/overview");
       localStorage.removeItem("adminLoginPending");
-      if (params.has("session")) history.replaceState(null, "", "/admin.html");
+      if (params.has("session")) history.replaceState(null, "", location.pathname);
       showPanel();
       return;
     } catch (error) {

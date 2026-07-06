@@ -103,6 +103,12 @@ func (c *catalogResponseCache) Set(key string, snapshot catalogSnapshot) {
 	c.entries[key] = catalogCacheEntry{expiresAt: time.Now().Add(c.ttl), snapshot: snapshot}
 }
 
+func (c *catalogResponseCache) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = map[string]catalogCacheEntry{}
+}
+
 func (c *smsmanCatalogCache) metadata(ctx context.Context, client *smsman.Client) ([]smsman.Item, []smsman.Item, error) {
 	c.metadataMu.Lock()
 	defer c.metadataMu.Unlock()
@@ -161,7 +167,9 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 	quoteCandidates := map[string][]providerQuote{}
 	livePricing := s.effectivePricing()
 	var heroErr error
-	if s.C.HeroKey != "" {
+	heroAvailable := s.providerSellable(ctx, "hero")
+	smsmanAvailable := s.providerSellable(ctx, "smsman")
+	if s.C.HeroKey != "" && heroAvailable {
 		if countries, err := s.Hero.Countries(ctx); err == nil {
 			snapshot.Countries = countries
 		}
@@ -183,12 +191,12 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 			}
 		}
 	}
-	if s.C.SMSManToken == "" {
+	if s.C.SMSManToken == "" || !smsmanAvailable {
 		if heroErr != nil {
 			return catalogSnapshot{}, heroErr
 		}
 		snapshot.Quotes = cheapestQuoteMap(quoteCandidates, livePricing)
-		snapshot.Offers = quoteListFromMap(snapshot.Quotes)
+		snapshot.Offers = allAvailableQuotes(quoteCandidates, livePricing)
 		return snapshot, nil
 	}
 
@@ -229,7 +237,7 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 			return catalogSnapshot{}, heroErr
 		}
 		snapshot.Quotes = cheapestQuoteMap(quoteCandidates, livePricing)
-		snapshot.Offers = quoteListFromMap(snapshot.Quotes)
+		snapshot.Offers = allAvailableQuotes(quoteCandidates, livePricing)
 		return snapshot, nil
 	}
 	smsQuotes, err := s.SMSCache.countryQuotes(ctx, s.SMSMan, smsCountryID)
@@ -254,7 +262,7 @@ func (s *Server) loadCatalog(ctx context.Context, country string) (catalogSnapsh
 		quoteCandidates[service.Code] = append(quoteCandidates[service.Code], candidate)
 	}
 	snapshot.Quotes = cheapestQuoteMap(quoteCandidates, livePricing)
-	snapshot.Offers = quoteListFromMap(snapshot.Quotes)
+	snapshot.Offers = allAvailableQuotes(quoteCandidates, livePricing)
 	if heroErr != nil && len(snapshot.Quotes) == 0 {
 		return catalogSnapshot{}, heroErr
 	}
@@ -271,8 +279,10 @@ func (s *Server) loadGlobalCatalog(ctx context.Context) (catalogSnapshot, error)
 	var smsQuotes map[int]map[int]smsman.Quote
 	var smsErr error
 	var providers sync.WaitGroup
+	heroAvailable := s.providerSellable(ctx, "hero")
+	smsmanAvailable := s.providerSellable(ctx, "smsman")
 
-	if s.C.HeroKey != "" {
+	if s.C.HeroKey != "" && heroAvailable {
 		providers.Add(1)
 		go func() {
 			defer providers.Done()
@@ -310,7 +320,7 @@ func (s *Server) loadGlobalCatalog(ctx context.Context) (catalogSnapshot, error)
 	} else {
 		heroErr = errors.New("HeroSMS is not configured")
 	}
-	if s.C.SMSManToken != "" {
+	if s.C.SMSManToken != "" && smsmanAvailable {
 		providers.Add(1)
 		go func() {
 			defer providers.Done()
@@ -490,6 +500,37 @@ func cheapestQuoteMap(candidates map[string][]providerQuote, pricing livePricing
 	return out
 }
 
+func allAvailableQuotes(candidates map[string][]providerQuote, pricing livePricing) []providerQuote {
+	out := make([]providerQuote, 0)
+	for _, items := range candidates {
+		for _, item := range items {
+			if item.Count <= 0 {
+				continue
+			}
+			out = append(out, item)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Service != out[j].Service {
+			return out[i].Service < out[j].Service
+		}
+		if out[i].Country != out[j].Country {
+			return out[i].Country < out[j].Country
+		}
+		if out[i].priceFen(pricing.Markup) != out[j].priceFen(pricing.Markup) {
+			return out[i].priceFen(pricing.Markup) < out[j].priceFen(pricing.Markup)
+		}
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		if out[i].Provider != out[j].Provider {
+			return out[i].Provider < out[j].Provider
+		}
+		return out[i].ProviderService < out[j].ProviderService
+	})
+	return out
+}
+
 func preferQuote(candidate, current providerQuote, pricing livePricing) bool {
 	if candidate.Count != current.Count {
 		return candidate.Count > current.Count
@@ -514,6 +555,91 @@ func quoteListFromMap(quotes map[string]providerQuote) []providerQuote {
 		out = append(out, item)
 	}
 	return out
+}
+
+func cheapestQuoteForService(offers []providerQuote, service string, pricing livePricing) (providerQuote, bool) {
+	var best providerQuote
+	found := false
+	for _, item := range offers {
+		if item.Service != service || item.Count <= 0 {
+			continue
+		}
+		if !found {
+			best = item
+			found = true
+			continue
+		}
+		left := item.priceFen(pricing.Markup)
+		right := best.priceFen(pricing.Markup)
+		if left != right {
+			if left < right {
+				best = item
+			}
+			continue
+		}
+		if item.Count != best.Count {
+			if item.Count > best.Count {
+				best = item
+			}
+			continue
+		}
+		if item.Provider < best.Provider {
+			best = item
+		}
+	}
+	return best, found
+}
+
+func mostExpensiveQuoteForService(offers []providerQuote, service string, pricing livePricing) (providerQuote, bool) {
+	var best providerQuote
+	found := false
+	for _, item := range offers {
+		if item.Service != service || item.Count <= 0 {
+			continue
+		}
+		if !found {
+			best = item
+			found = true
+			continue
+		}
+		left := item.priceFen(pricing.Markup)
+		right := best.priceFen(pricing.Markup)
+		if left != right {
+			if left > right {
+				best = item
+			}
+			continue
+		}
+		if item.Count != best.Count {
+			if item.Count > best.Count {
+				best = item
+			}
+			continue
+		}
+		if item.Provider < best.Provider {
+			best = item
+		}
+	}
+	return best, found
+}
+
+func fastestQuoteForService(offers []providerQuote, service string, pricing livePricing) (providerQuote, bool) {
+	var best providerQuote
+	found := false
+	for _, item := range offers {
+		if item.Service != service || item.Count <= 0 {
+			continue
+		}
+		if !found {
+			best = item
+			found = true
+			continue
+		}
+		if preferQuote(item, best, pricing) {
+			best = item
+		}
+	}
+	return best, found
 }
 
 func matchingHeroCountryID(items []hero.Country, name string) int {
