@@ -1,0 +1,28 @@
+{{define "layout"}}<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{.Title}}</title>
+  <meta name="description" content="{{.Description}}">
+  <meta name="robots" content="{{.Robots}}">
+  <meta name="theme-color" content="#2762ff">
+  <link rel="canonical" href="{{.Canonical}}">
+  {{range .Stylesheets}}<link rel="stylesheet" href="{{.}}">
+  {{end}}
+</head>
+<body>
+  <div class="glow one"></div><div class="glow two"></div>
+  <header><a class="brand" href="/"><span>Y</span> 云码台</a></header>
+  {{template "content" .}}
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <div class="footer-about"><a class="brand" href="/"><span>Y</span> 云码台</a><p>聚合多家短信服务商，提供清晰、快捷的验证码接收服务。</p></div>
+      <nav class="footer-links" aria-label="页脚导航"><a href="/contact.html">联系我们</a><a href="/api.html">API 接入</a><a href="/privacy.html">隐私政策</a><a href="/terms.html">用户协议</a></nav>
+      <p class="copyright">© 2026 云码台 · 按次支付，无需预存余额</p>
+    </div>
+  </footer>
+  {{range .Scripts}}<script src="{{.}}"></script>
+  {{end}}
+</body>
+</html>{{end}}
