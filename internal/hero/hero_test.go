@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -144,5 +145,38 @@ func TestCallSendsBrowserLikeHeaders(t *testing.T) {
 	balance, err := New("key", server.URL, "840").Balance(context.Background())
 	if err != nil || balance != 1.23 {
 		t.Fatalf("balance=%v err=%v", balance, err)
+	}
+}
+
+func TestAcquireSendsOnlySupportedNumberParameters(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		for _, key := range []string{"api_key", "action", "country", "service"} {
+			if q.Get(key) == "" {
+				t.Fatalf("missing query parameter %q in %s", key, r.URL.RawQuery)
+			}
+		}
+		for _, key := range []string{"currency", "fixedPrice", "maxPrice"} {
+			if q.Has(key) {
+				t.Fatalf("unexpected query parameter %q in %s", key, r.URL.RawQuery)
+			}
+		}
+		_, _ = w.Write([]byte(`{"activationId":"123","phoneNumber":"628001","activationCost":0.2}`))
+	}))
+	defer server.Close()
+	activation, err := New("key", server.URL, "840").Acquire(context.Background(), "6", "tg", .2)
+	if err != nil || activation.ID != "123" {
+		t.Fatalf("activation=%+v err=%v", activation, err)
+	}
+}
+
+func TestAcquireIncludesUnexpectedResponseInError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"title":"PARAMETER_ERROR","message":"fixedPrice is invalid"}`))
+	}))
+	defer server.Close()
+	_, err := New("key", server.URL, "840").Acquire(context.Background(), "6", "tg", .2)
+	if err == nil || !strings.Contains(err.Error(), "PARAMETER_ERROR") {
+		t.Fatalf("err=%v, want response body in error", err)
 	}
 }

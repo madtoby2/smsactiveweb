@@ -75,17 +75,17 @@ func New(c config.Config, s *store.Store) *Server {
 		sender = &mailer.Resend{APIKey: c.ResendAPIKey, From: c.ResendFrom}
 	}
 	return &Server{
-		C:         c,
-		Store:     s,
-		Hero:      hero.New(c.HeroKey, c.HeroURL, c.HeroCurrency),
-		SMSMan:    smsman.New(c.SMSManToken, c.SMSManURL),
-		SMSCache:  newSMSManCatalogCache(),
-		Catalog:   newCatalogResponseCache(2 * time.Minute),
+		C:              c,
+		Store:          s,
+		Hero:           hero.New(c.HeroKey, c.HeroURL, c.HeroCurrency),
+		SMSMan:         smsman.New(c.SMSManToken, c.SMSManURL),
+		SMSCache:       newSMSManCatalogCache(),
+		Catalog:        newCatalogResponseCache(2 * time.Minute),
 		ProviderStatus: newProviderStatusCache(30 * time.Second),
-		YSM:       yishoumi.New(c.YSMAppID, c.YSMSecret, c.YSMURL),
-		EPay:      epay.New(c.EPayPID, c.EPayKey, c.EPayURL, epay.WithRefundKeys(c.EPayPlatformPublicKey, c.EPayMerchantPrivateKey)),
-		Mailer:    sender,
-		Turnstile: turnstile.New(c.TurnstileSecret),
+		YSM:            yishoumi.New(c.YSMAppID, c.YSMSecret, c.YSMURL),
+		EPay:           epay.New(c.EPayPID, c.EPayKey, c.EPayURL, epay.WithRefundKeys(c.EPayPlatformPublicKey, c.EPayMerchantPrivateKey)),
+		Mailer:         sender,
+		Turnstile:      turnstile.New(c.TurnstileSecret),
 	}
 }
 

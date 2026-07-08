@@ -22,6 +22,8 @@
       <p class="copyright">© 2026 云码台 · 按次支付，无需预存余额</p>
     </div>
   </footer>
+  {{with .Structured}}<script type="application/ld+json">{{.}}</script>
+  {{end}}
   {{range .Scripts}}<script src="{{.}}"></script>
   {{end}}
 </body>

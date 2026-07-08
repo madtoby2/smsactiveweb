@@ -2119,16 +2119,16 @@ func TestCountryCatalogKeepsMultipleProviderOffersForRouteChoice(t *testing.T) {
 	defer smsUpstream.Close()
 
 	server := New(config.Config{
-		HeroKey:                 "hero",
-		HeroURL:                 heroUpstream.URL,
-		HeroCurrency:            "840",
-		SMSManToken:             "sms",
-		SMSManURL:               smsUpstream.URL,
-		USDCNY:                  7.2,
-		SMSManCNYRate:           7.2,
-		Markup:                  1,
-		PayProvider:             "sandbox",
-		AllowLiveSMSInSandbox:   true,
+		HeroKey:               "hero",
+		HeroURL:               heroUpstream.URL,
+		HeroCurrency:          "840",
+		SMSManToken:           "sms",
+		SMSManURL:             smsUpstream.URL,
+		USDCNY:                7.2,
+		SMSManCNYRate:         7.2,
+		Markup:                1,
+		PayProvider:           "sandbox",
+		AllowLiveSMSInSandbox: true,
 	}, db)
 	handler := server.Routes()
 

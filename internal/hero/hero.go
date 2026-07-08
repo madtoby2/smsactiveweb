@@ -224,7 +224,8 @@ func number(v any) (float64, bool) {
 }
 
 func (c *Client) Acquire(ctx context.Context, country, service string, maxPrice float64) (Activation, error) {
-	b, e := c.call(ctx, "getNumberV2", map[string]string{"country": country, "service": service, "maxPrice": strconv.FormatFloat(maxPrice, 'f', 4, 64), "fixedPrice": "true", "currency": c.Currency})
+	params := map[string]string{"country": country, "service": service}
+	b, e := c.call(ctx, "getNumberV2", params)
 	if e != nil {
 		return Activation{}, e
 	}
@@ -241,7 +242,7 @@ func (c *Client) Acquire(ctx context.Context, country, service string, maxPrice 
 	if len(p) == 3 && p[0] == "ACCESS_NUMBER" {
 		return Activation{p[1], p[2], maxPrice}, nil
 	}
-	return Activation{}, fmt.Errorf("HeroSMS unexpected response")
+	return Activation{}, fmt.Errorf("HeroSMS unexpected response: %s", strings.TrimSpace(string(b)))
 }
 func (c *Client) Status(ctx context.Context, id string) (string, error) {
 	b, e := c.call(ctx, "getStatus", map[string]string{"id": id})

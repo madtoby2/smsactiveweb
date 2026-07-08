@@ -829,6 +829,9 @@ func (s *Store) SetRechargeStatus(id, status string) error {
 		if _, e = tx.Exec("UPDATE sms_orders SET status='payment_failed' WHERE id=? AND status='awaiting_payment'", reference); e != nil {
 			return e
 		}
+		if _, e = tx.Exec("UPDATE product_orders SET status='payment_failed' WHERE id=? AND status='awaiting_payment'", reference); e != nil {
+			return e
+		}
 	}
 	return tx.Commit()
 }

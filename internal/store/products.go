@@ -204,6 +204,12 @@ func (s *Store) GetProductOrderByID(id string) (ProductOrder, error) {
 	return item, err
 }
 
+func (s *Store) IsProductOrder(id string) (bool, error) {
+	var exists int
+	err := s.DB.QueryRow(`SELECT EXISTS(SELECT 1 FROM product_orders WHERE id=?)`, id).Scan(&exists)
+	return exists == 1, err
+}
+
 func (s *Store) CompleteProductPayment(id string, providerID string) (string, error) {
 	tx, err := s.DB.Begin()
 	if err != nil {

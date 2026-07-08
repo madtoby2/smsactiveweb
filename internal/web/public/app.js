@@ -50,9 +50,14 @@ const COUNTRY_FALLBACKS = {
   '7': '马来西亚',
   '8': '越南',
   '9': '泰国',
-  '10': '中国香港',
+  '10': '越南',
   '11': '日本',
   '12': '美国',
+};
+const COUNTRY_DIAL_CODES = {
+  '4': '63',
+  '8': '84',
+  '10': '84',
 };
 function countryName(value) {
   const key = String(value ?? '').trim();
@@ -79,6 +84,10 @@ function formatPhoneNumber(value, country) {
   const countryID = String(country ?? '').trim();
   if ((countryID === '4' || raw.startsWith('63')) && digits.length >= 12 && digits.startsWith('63')) {
     return `+63 (${digits.slice(2, 5)}) ${digits.slice(5)}`;
+  }
+  const dialCode = COUNTRY_DIAL_CODES[countryID];
+  if (dialCode && digits.startsWith(dialCode) && digits.length > dialCode.length) {
+    return `+${dialCode} ${digits.slice(dialCode.length)}`;
   }
   return raw;
 }
@@ -117,6 +126,7 @@ function countryFlagCode(value, country) {
     Kenya: 'KE',
     Tanzania: 'TZ',
     Vietnam: 'VN',
+    '越南': 'VN',
     Kyrgyzstan: 'KG',
     Israel: 'IL',
     'Hong Kong': 'HK',
