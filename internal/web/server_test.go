@@ -1643,6 +1643,33 @@ func TestPublicSEOAndFooterAssets(t *testing.T) {
 	}
 }
 
+func TestSitemapUsesCrawlerFriendlyHeaders(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "sitemap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	h := New(config.Config{}, db).Routes()
+	req := httptest.NewRequest(http.MethodGet, "/sitemap.xml", nil)
+	result := httptest.NewRecorder()
+	h.ServeHTTP(result, req)
+	if result.Code != http.StatusOK {
+		t.Fatalf("GET /sitemap.xml status=%d", result.Code)
+	}
+	if got := result.Header().Get("Content-Type"); got != "application/xml; charset=utf-8" {
+		t.Fatalf("Content-Type=%q", got)
+	}
+	if got := result.Header().Get("Content-Length"); got == "" {
+		t.Fatal("Content-Length is empty")
+	}
+	if got := result.Header().Get("Content-Security-Policy"); got != "" {
+		t.Fatalf("Content-Security-Policy=%q", got)
+	}
+	if !strings.Contains(result.Body.String(), `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">`) {
+		t.Fatal("sitemap body missing urlset")
+	}
+}
+
 func TestHTMLPagesDisableCaching(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "html-cache.db"))
 	if err != nil {

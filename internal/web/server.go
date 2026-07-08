@@ -136,6 +136,8 @@ func (s *Server) Routes() http.Handler {
 	m := http.NewServeMux()
 	sub, _ := fs.Sub(assets, "public")
 	m.HandleFunc("GET /healthz", s.health)
+	m.HandleFunc("GET /robots.txt", s.robots)
+	m.HandleFunc("GET /sitemap.xml", s.sitemap)
 	m.HandleFunc("GET /admin.html", s.adminPageNotFound)
 	m.HandleFunc("GET "+s.C.AdminUIPath, s.hiddenAdminPage)
 	for route := range pageViews {
@@ -198,6 +200,10 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 }
 func security(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/robots.txt" || r.URL.Path == "/sitemap.xml" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "same-origin")
@@ -205,6 +211,31 @@ func security(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+func (s *Server) robots(w http.ResponseWriter, r *http.Request) {
+	content, err := assets.ReadFile("public/robots.txt")
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+	_, _ = w.Write(content)
+}
+
+func (s *Server) sitemap(w http.ResponseWriter, r *http.Request) {
+	content, err := assets.ReadFile("public/sitemap.xml")
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+	_, _ = w.Write(content)
+}
+
 func (s *Server) publicFiles(fsys http.FileSystem) http.Handler {
 	files := http.FileServer(fsys)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
