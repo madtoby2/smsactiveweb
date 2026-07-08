@@ -29,7 +29,7 @@ import (
 	"sms-platform/internal/yishoumi"
 )
 
-//go:embed public/* public/flags/*
+//go:embed public/* public/flags/* templates/* templates/pages/*
 var assets embed.FS
 
 type Server struct {
@@ -138,6 +138,9 @@ func (s *Server) Routes() http.Handler {
 	m.HandleFunc("GET /healthz", s.health)
 	m.HandleFunc("GET /admin.html", s.adminPageNotFound)
 	m.HandleFunc("GET "+s.C.AdminUIPath, s.hiddenAdminPage)
+	for route := range pageViews {
+		m.HandleFunc("GET "+route, s.page)
+	}
 	m.Handle("/", s.publicFiles(http.FS(sub)))
 	m.HandleFunc("POST /api/auth/register", s.register)
 	m.HandleFunc("GET /api/auth/config", s.authConfig)
